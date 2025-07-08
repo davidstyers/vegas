@@ -85,13 +85,35 @@ class Context:
 class Strategy:
     """Base class for implementing trading strategies.
     
-    This class provides a vectorized approach to implementing trading strategies.
-    Subclass this class and implement the required methods to define your strategy.
+    This class provides both vectorized and event-driven approaches to implementing 
+    trading strategies. Subclass this class and implement the required methods to define your strategy.
+    
+    For vectorized strategies, implement generate_signals_vectorized.
+    For event-driven strategies, implement the on_* methods and handle_data.
     """
     
     def __init__(self):
         """Initialize the strategy."""
         self.context = Context()
+        self._is_event_driven = False
+        
+    @property
+    def is_event_driven(self):
+        """Check if this strategy requires event-driven execution.
+        
+        Returns:
+            True if the strategy should run in event-driven mode, False otherwise
+        """
+        return self._is_event_driven
+    
+    @is_event_driven.setter
+    def is_event_driven(self, value):
+        """Set whether the strategy requires event-driven execution.
+        
+        Args:
+            value: True to force event-driven mode, False to use default detection
+        """
+        self._is_event_driven = value
     
     def initialize(self, context: Context) -> None:
         """Initialize the strategy with parameters.
@@ -107,8 +129,8 @@ class Strategy:
     def handle_data(self, context: Context, data: pd.DataFrame) -> List[Signal]:
         """Process market data and generate trading signals.
         
-        This method can be called for each time step in the backtest.
-        Override this method to implement your strategy logic.
+        This method is called for each time step in the event-driven backtest.
+        Override this method to implement your strategy logic for event-driven mode.
         
         Args:
             context: Strategy context
@@ -146,6 +168,75 @@ class Strategy:
             context: Strategy context
             data: Market data for the current day
         """
+        # Implementing this method will automatically enable event-driven mode
+        pass
+    
+    def on_market_open(self, context: Context, data: pd.DataFrame, portfolio) -> None:
+        """Execute logic at market open.
+        
+        This method is called at market open (9:30 AM) of each trading day.
+        Override this method to implement specific market open logic.
+        
+        Args:
+            context: Strategy context
+            data: Market data for the current time
+            portfolio: Portfolio object with current positions and cash
+        """
+        # Implementing this method will automatically enable event-driven mode
+        pass
+    
+    def on_market_close(self, context: Context, data: pd.DataFrame, portfolio) -> None:
+        """Execute logic at market close.
+        
+        This method is called at market close (4:00 PM) of each trading day.
+        Override this method to implement specific market close logic.
+        
+        Args:
+            context: Strategy context
+            data: Market data for the current time
+            portfolio: Portfolio object with current positions and cash
+        """
+        # Implementing this method will automatically enable event-driven mode
+        pass
+    
+    def on_bar(self, context: Context, data: pd.DataFrame) -> None:
+        """Execute logic when a new bar is received.
+        
+        This method is called when a new bar is available in event-driven mode.
+        Override this method to implement bar-specific logic.
+        
+        Args:
+            context: Strategy context
+            data: Market data for the current bar
+        """
+        # Implementing this method will automatically enable event-driven mode
+        pass
+    
+    def on_tick(self, context: Context, data: pd.DataFrame) -> None:
+        """Execute logic when a new tick is received.
+        
+        This method is called when a new tick is available in event-driven mode.
+        Override this method to implement tick-specific logic.
+        
+        Args:
+            context: Strategy context
+            data: Market data for the current tick
+        """
+        # Implementing this method will automatically enable event-driven mode
+        pass
+    
+    def on_trade(self, context: Context, trade_event: Dict[str, Any], portfolio) -> None:
+        """Execute logic when a trade is executed.
+        
+        This method is called when a trade from this strategy is executed.
+        Override this method to implement trade-specific logic.
+        
+        Args:
+            context: Strategy context
+            trade_event: Dict with trade details
+            portfolio: Portfolio object with current positions and cash
+        """
+        # Implementing this method will automatically enable event-driven mode
         pass
     
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:

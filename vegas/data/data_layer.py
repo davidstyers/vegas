@@ -5,7 +5,7 @@ using pandas and numpy for efficient vectorized operations.
 """
 
 from typing import Dict, List, Optional, Union, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import pandas as pd
 import numpy as np
@@ -440,3 +440,101 @@ class DataLayer:
                 self.logger.info("Database connection closed")
             except Exception as e:
                 self.logger.error(f"Error closing database connection: {e}")
+    
+    def get_data_for_timestamp(self, timestamp: datetime) -> pd.DataFrame:
+        """Get market data for a specific timestamp.
+        
+        Args:
+            timestamp: The timestamp to get data for
+            
+        Returns:
+            DataFrame with market data for the timestamp
+        """
+        # Try to get data from database first if available
+        if self.use_database and self.db_manager:
+            try:
+                # Use a small window around the timestamp to ensure we get data
+                start_time = timestamp - pd.Timedelta(minutes=1)
+                end_time = timestamp + pd.Timedelta(minutes=1)
+                data = self.db_manager.get_market_data(start_date=start_time, end_date=end_time)
+                
+                # Filter to get closest timestamps
+                if not data.empty:
+                    # Get the closest timestamp for each symbol
+                    grouped = data.groupby('symbol')
+                    closest_data = []
+                    
+                    for symbol, group in grouped:
+                        # Find the row with timestamp closest to the target
+                        group['time_diff'] = abs(group['timestamp'] - timestamp)
+                        closest_row = group.loc[group['time_diff'].idxmin()].drop('time_diff')
+                        closest_data.append(closest_row)
+                    
+                    if closest_data:
+                        return pd.DataFrame(closest_data)
+            except Exception as e:
+                self.logger.warning(f"Failed to get data from database for timestamp {timestamp}: {e}")
+        
+        # Fall back to in-memory data if available
+        if self.data is not None:
+            # Find the closest timestamp for each symbol
+            filtered_data = self.data.copy()
+            filtered_data['time_diff'] = abs(filtered_data['timestamp'] - timestamp)
+            
+            # Get the closest timestamp for each symbol
+            closest_idx = filtered_data.groupby('symbol')['time_diff'].idxmin()
+            result = filtered_data.loc[closest_idx].drop('time_diff', axis=1)
+            
+            return result
+            
+        # No data available
+        return pd.DataFrame()
+    
+    def get_trading_days(self, start_date: datetime, end_date: datetime) -> pd.DatetimeIndex:
+        """Get all trading days in the specified date range.
+        
+        Args:
+            start_date: Start date
+            end_date: End date
+            
+        Returns:
+            DatetimeIndex with trading days
+        """
+        # Try to get from database if available
+        if self.use_database and self.db_manager:
+            try:
+                trading_days = self.db_manager.get_trading_days(start_date, end_date)
+                if not trading_days.empty:
+                    return pd.DatetimeIndex(trading_days['date'])
+            except Exception as e:
+                self.logger.warning(f"Failed to get trading days from database: {e}")
+        
+        # Fall back to in-memory data
+        if self.data is not None:
+            # Filter by date range
+            filtered_data = self.data[
+                (self.data['timestamp'] >= pd.Timestamp(start_date)) & 
+                (self.data['timestamp'] <= pd.Timestamp(end_date))
+            ]
+            
+            # Extract unique dates
+            dates = filtered_data['timestamp'].dt.floor('D').unique()
+            return pd.DatetimeIndex(dates)
+        
+        # If no data available, generate business days
+        # This is a fallback and may include non-trading days
+        return pd.bdate_range(start=start_date, end=end_date)
+    
+    def get_data_for_date(self, date: datetime) -> pd.DataFrame:
+        """Get all market data for a specific date.
+        
+        Args:
+            date: The date to get data for
+            
+        Returns:
+            DataFrame with market data for the date
+        """
+        date_floor = pd.Timestamp(date).floor('D')
+        date_ceil = date_floor + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        
+        return self.get_data_for_backtest(date_floor, date_ceil)

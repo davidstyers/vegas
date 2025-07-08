@@ -3,7 +3,7 @@
 This module provides a minimal, vectorized backtesting engine.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime
 import pandas as pd
 import time
@@ -13,9 +13,24 @@ from vegas.data import DataLayer
 from vegas.strategy import Strategy, Context
 from vegas.portfolio import Portfolio
 
+# Import event engine if Cython is available
+try:
+    from vegas.engine.event_engine import EventDrivenEngine, generate_events
+    CYTHON_AVAILABLE = True
+except ImportError:
+    # Fallback to Python implementations if Cython fails
+    CYTHON_AVAILABLE = False
+    from vegas.engine.event_engine_py import EventDrivenEngine, generate_events
+
 
 class BacktestEngine:
-    """Minimal vectorized backtesting engine for the Vegas backtesting system."""
+    """Backtesting engine for the Vegas backtesting system.
+    
+    This engine supports both vectorized and event-driven backtests.
+    Vectorized mode is used by default for performance, but event-driven
+    mode is automatically selected when a strategy implements event methods
+    or when explicitly requested.
+    """
     
     def __init__(self, data_dir: str = "db"):
         """Initialize the backtest engine.
@@ -72,14 +87,16 @@ class BacktestEngine:
                         f"from {data_info['start_date']} to {data_info['end_date']}")
     
     def run(self, start: datetime, end: datetime, strategy: Strategy,
-           initial_capital: float = 100000.0) -> Dict[str, Any]:
-        """Run a vectorized backtest.
+           initial_capital: float = 100000.0, event_driven: bool = None) -> Dict[str, Any]:
+        """Run a backtest.
         
         Args:
             start: Start date for the backtest
             end: End date for the backtest
             strategy: Strategy to run
             initial_capital: Initial capital
+            event_driven: Override to force event-driven mode (True) or vectorized mode (False)
+                          If None, the engine will detect the appropriate mode based on the strategy
             
         Returns:
             Dictionary with backtest results
@@ -92,6 +109,7 @@ class BacktestEngine:
         
         # Get context and initialize strategy
         context = self.strategy.context
+        context.set_portfolio(self.portfolio)  # Ensure portfolio is accessible
         self.strategy.initialize(context)
         
         start_time = time.time()
@@ -104,28 +122,87 @@ class BacktestEngine:
             self._logger.warning("No data available for the specified period")
             return self._create_empty_results()
         
-        # Execute vectorized backtest
-        self._logger.info("Executing vectorized backtest")
-        self._run_vectorized_backtest(market_data, context)
+        # Determine whether to use event-driven or vectorized mode
+        should_use_event_driven = self._requires_event_driven(strategy)
+        
+        # Override if explicitly specified
+        if event_driven is not None:
+            should_use_event_driven = event_driven
+            if event_driven:
+                self._logger.info("Event-driven mode explicitly requested")
+            else:
+                self._logger.info("Vectorized mode explicitly requested")
+                
+        # Execute the appropriate backtest type
+        if should_use_event_driven:
+            self._logger.info("Executing event-driven backtest")
+            results_dict = self._run_event_driven_backtest(start, end, context)
+        else:
+            self._logger.info("Executing vectorized backtest")
+            self._run_vectorized_backtest(market_data, context)
+            
+            # Create results dictionary for vectorized mode
+            results_dict = {
+                'stats': self.portfolio.get_stats(),
+                'equity_curve': self.portfolio.get_equity_curve(),
+                'transactions': self.portfolio.get_transactions(),
+                'positions': self.portfolio.get_positions(),
+                'success': True
+            }
         
         # Calculate execution time
         execution_time = time.time() - start_time
         self._logger.info(f"Backtest completed in {execution_time:.2f} seconds")
         
-        # Create results dictionary
-        results_dict = {
-            'stats': self.portfolio.get_stats(),
-            'equity_curve': self.portfolio.get_equity_curve(),
-            'transactions': self.portfolio.get_transactions(),
-            'positions': self.portfolio.get_positions(),
-            'execution_time': execution_time,
-            'success': True
-        }
+        # Add execution time to results
+        results_dict['execution_time'] = execution_time
         
         # Allow strategy to analyze results
         self.strategy.analyze(context, results_dict)
         
         return results_dict
+    
+    def _requires_event_driven(self, strategy: Strategy) -> bool:
+        """Check if a strategy requires event-driven execution.
+        
+        A strategy requires event-driven execution if:
+        1. It has explicitly set is_event_driven = True
+        2. It implements any of the event-driven methods with custom logic
+        
+        Args:
+            strategy: Strategy to check
+            
+        Returns:
+            True if the strategy should use event-driven mode
+        """
+        # Check explicit flag first
+        if hasattr(strategy, 'is_event_driven') and strategy.is_event_driven:
+            return True
+            
+        # Check if any event methods are implemented (not using default implementation)
+        event_methods = [
+            'before_trading_start',
+            'on_market_open',
+            'on_market_close',
+            'on_bar',
+            'on_tick',
+            'on_trade'
+        ]
+        
+        strategy_class = strategy.__class__
+        base_class = Strategy
+        
+        for method_name in event_methods:
+            # Check if the method is overridden
+            if hasattr(strategy_class, method_name):
+                strategy_method = getattr(strategy_class, method_name)
+                base_method = getattr(base_class, method_name)
+                
+                # If the method implementation is different from the base class
+                if strategy_method.__code__ is not base_method.__code__:
+                    return True
+                    
+        return False
     
     def _run_vectorized_backtest(self, market_data: pd.DataFrame, context: Context) -> None:
         """Run the vectorized backtest algorithm.
@@ -169,6 +246,41 @@ class BacktestEngine:
                 
             # Update portfolio with transactions (or empty DataFrame if no transactions)
             self.portfolio.update_from_transactions(timestamp, transactions, current_data)
+    
+    def _run_event_driven_backtest(self, start: datetime, end: datetime, context: Context) -> Dict[str, Any]:
+        """Run the event-driven backtest algorithm.
+        
+        Args:
+            start: Start date for the backtest
+            end: End date for the backtest
+            context: Strategy context
+            
+        Returns:
+            Dictionary with backtest results
+        """
+        # Generate events for the backtest period
+        self._logger.info("Generating events for event-driven backtest")
+        events_df = generate_events(start, end, self.data_layer, debug=False)
+        
+        if events_df.empty:
+            self._logger.warning("No events generated for the backtest period")
+            return self._create_empty_results()
+            
+        # Create event-driven engine
+        if CYTHON_AVAILABLE:
+            self._logger.info("Using Cython-optimized event engine")
+        else:
+            self._logger.warning("Cython event engine not available, using Python fallback")
+            
+        event_engine = EventDrivenEngine(
+            self.strategy, 
+            self.portfolio, 
+            self.data_layer, 
+            self._logger
+        )
+        
+        # Run the event-driven backtest
+        return event_engine.run_event_driven_backtest(events_df)
     
     def _create_transactions_from_signals(self, signals: pd.DataFrame, 
                                          market_data: pd.DataFrame) -> pd.DataFrame:

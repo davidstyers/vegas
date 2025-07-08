@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """Setup script for the Vegas backtesting engine."""
 
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+from Cython.Build import cythonize
+import numpy as np
+
+# Define Cython extensions
+extensions = [
+    Extension(
+        "vegas.engine.event_engine",
+        ["vegas/engine/event_engine.pyx"],
+        include_dirs=[np.get_include()]
+    )
+]
 
 setup(
     name="vegas",
@@ -19,7 +30,9 @@ setup(
         "quantstats>=0.0.59",  # For performance analytics and tearsheets
         "duckdb>=0.9.0",      # For efficient data querying
         "pyarrow>=14.0.0",    # For Parquet support
+        "cython>=3.0.0",      # For Cython compilation
     ],
+    ext_modules=cythonize(extensions),
     entry_points={
         "console_scripts": [
             "vegas=vegas.cli.main:main",
