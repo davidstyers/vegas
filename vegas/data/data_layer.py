@@ -4,17 +4,16 @@ This module provides functionality for ingesting and querying historical market 
 using pandas and numpy for efficient vectorized operations.
 """
 
-from typing import Dict, List, Optional, Union, Tuple, Set
-from datetime import datetime, date
+from typing import Dict, List, Optional, Union, Set
+from datetime import datetime
 import os
 import pandas as pd
 import numpy as np
 import glob
 import zstandard as zstd
-import csv
 import io
-from pathlib import Path
 import logging
+from pathlib import Path
 
 from vegas.database import DatabaseManager
 
@@ -51,22 +50,20 @@ class DataLayer:
             self.use_database = False
     
     def is_initialized(self) -> bool:
-        """Check if the data layer is initialized with data.
-        
-        Returns:
-            True if data is loaded, False otherwise
-        """
+        """Check if the data layer is initialized with data."""
+        # Check if in-memory data is available
+        if self.data is not None and not self.data.empty:
+            return True
+            
+        # Check if database data is available
         if self.use_database and self.db_manager:
-            # Check if there's data in the database
             try:
                 dates = self.db_manager.get_available_dates()
                 return not dates.empty and dates['day_count'].iloc[0] > 0
             except Exception as e:
                 self.logger.warning(f"Database query failed: {e}")
-                # Fall back to in-memory check
-                return self.data is not None and not self.data.empty
-        else:
-            return self.data is not None and not self.data.empty
+                
+        return False
     
     def load_data(self, file_path: str = None, directory: str = None, file_pattern: str = "*.csv*") -> None:
         """Load market data from a file or directory.
@@ -82,62 +79,43 @@ class DataLayer:
             self._load_multiple_files(directory, file_pattern)
         else:
             # Try to load from database if no file specified
-            if self.use_database and self.db_manager:
-                try:
-                    # Check if there's data in the database
-                    dates = self.db_manager.get_available_dates()
-                    if not dates.empty and dates['day_count'].iloc[0] > 0:
-                        self.logger.info("Using data from database")
-                        # Load a sample to initialize the data layer
-                        data = self.db_manager.get_market_data(
-                            start_date=dates['start_date'].iloc[0],
-                            end_date=dates['start_date'].iloc[0] + pd.Timedelta(days=1)
-                        )
-                        if not data.empty:
-                            self._validate_and_process_data(data)
-                            return
-                except Exception as e:
-                    self.logger.warning(f"Failed to load data from database: {e}")
-            
-            raise ValueError("No data source specified and no data available in database")
+            self._try_load_from_database()
+    
+    def _try_load_from_database(self) -> None:
+        """Try to load data from database if available."""
+        if self.use_database and self.db_manager:
+            try:
+                dates = self.db_manager.get_available_dates()
+                if not dates.empty and dates['day_count'].iloc[0] > 0:
+                    self.logger.info("Using data from database")
+                    # Load a sample to initialize the data layer
+                    data = self.db_manager.get_market_data(
+                        start_date=dates['start_date'].iloc[0],
+                        end_date=dates['start_date'].iloc[0] + pd.Timedelta(days=1)
+                    )
+                    if not data.empty:
+                        self._validate_and_process_data(data)
+                        return
+            except Exception as e:
+                self.logger.warning(f"Failed to load data from database: {e}")
+        
+        raise ValueError("No data source specified and no data available in database")
     
     def _load_single_file(self, file_path: str) -> None:
-        """Load market data from a single file.
-        
-        Args:
-            file_path: Path to a CSV or compressed CSV file
-        """
+        """Load market data from a single file."""
         self.logger.info(f"Loading data from file: {file_path}")
         
-        # Check if it's an OHLCV file
-        if file_path.endswith('.ohlcv-1h.csv.zst'):
-            if self.use_database and self.db_manager:
-                try:
-                    self.db_manager.ingest_ohlcv_file(file_path)
-                    # Load a sample to initialize the data layer
-                    dates = self.db_manager.get_available_dates()
-                    if not dates.empty:
-                        data = self.db_manager.get_market_data(
-                            start_date=dates['start_date'].iloc[0],
-                            end_date=dates['start_date'].iloc[0] + pd.Timedelta(days=1)
-                        )
-                        if not data.empty:
-                            self._validate_and_process_data(data)
-                            return
-                except Exception as e:
-                    self.logger.error(f"Failed to ingest OHLCV file into database: {e}")
+        # Handle OHLCV files for database ingestion
+        if file_path.endswith('.ohlcv-1h.csv.zst') and self.use_database and self.db_manager:
+            try:
+                self.db_manager.ingest_ohlcv_file(file_path)
+                self._try_load_from_database()
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to ingest OHLCV file: {e}")
         
-        # Regular file loading
-        if file_path.endswith('.zst'):
-            # Decompress Zstandard file
-            with open(file_path, 'rb') as f:
-                dctx = zstd.ZstdDecompressor()
-                data_buffer = dctx.decompress(f.read())
-                csv_data = io.StringIO(data_buffer.decode('utf-8'))
-                df = pd.read_csv(csv_data, parse_dates=['timestamp'])
-        else:
-            # Regular CSV file
-            df = pd.read_csv(file_path, parse_dates=['timestamp'])
+        # Load the file into a DataFrame
+        df = self._read_file(file_path)
         
         # Process the data
         self._validate_and_process_data(df)
@@ -150,50 +128,38 @@ class DataLayer:
             except Exception as e:
                 self.logger.error(f"Failed to ingest data into database: {e}")
     
+    def _read_file(self, file_path: str) -> pd.DataFrame:
+        """Read file and return DataFrame."""
+        if file_path.endswith('.zst'):
+            # Decompress Zstandard file
+            with open(file_path, 'rb') as f:
+                dctx = zstd.ZstdDecompressor()
+                data_buffer = dctx.decompress(f.read())
+                csv_data = io.StringIO(data_buffer.decode('utf-8'))
+                return pd.read_csv(csv_data, parse_dates=['timestamp'])
+        else:
+            # Regular CSV file
+            return pd.read_csv(file_path, parse_dates=['timestamp'])
+    
     def _load_multiple_files(self, directory: str = None, file_pattern: str = "*.csv*", 
                            max_files: int = None) -> None:
-        """Load market data from multiple files.
-        
-        Args:
-            directory: Directory containing data files
-            file_pattern: Pattern for matching files
-            max_files: Maximum number of files to load
-        """
+        """Load market data from multiple files."""
         if directory is None:
             directory = self.data_dir
             
         self.logger.info(f"Loading data from directory: {directory} with pattern: {file_pattern}")
         
-        # Check if it's an OHLCV directory
-        if file_pattern == "*.ohlcv-1h.csv.zst":
-            if self.use_database and self.db_manager:
-                try:
-                    self.db_manager.ingest_ohlcv_directory(directory, file_pattern, max_files)
-                    # Load a sample to initialize the data layer
-                    dates = self.db_manager.get_available_dates()
-                    if not dates.empty:
-                        data = self.db_manager.get_market_data(
-                            start_date=dates['start_date'].iloc[0],
-                            end_date=dates['start_date'].iloc[0] + pd.Timedelta(days=1)
-                        )
-                        if not data.empty:
-                            self._validate_and_process_data(data)
-                            return
-                except Exception as e:
-                    self.logger.error(f"Failed to ingest OHLCV files into database: {e}")
+        # Handle OHLCV directory for database ingestion
+        if file_pattern == "*.ohlcv-1h.csv.zst" and self.use_database and self.db_manager:
+            try:
+                self.db_manager.ingest_ohlcv_directory(directory, file_pattern, max_files)
+                self._try_load_from_database()
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to ingest OHLCV files: {e}")
         
         # Find data files
-        search_path = os.path.join(directory, file_pattern)
-        files = sorted(glob.glob(search_path))
-        
-        if not files:
-            # Try subdirectories if no files found
-            for subdir in os.listdir(directory):
-                subdir_path = os.path.join(directory, subdir)
-                if os.path.isdir(subdir_path):
-                    search_path = os.path.join(subdir_path, file_pattern)
-                    subdir_files = sorted(glob.glob(search_path))
-                    files.extend(subdir_files)
+        files = self._find_files(directory, file_pattern)
         
         if not files:
             raise FileNotFoundError(f"No data files found in {directory} with pattern {file_pattern}")
@@ -208,17 +174,7 @@ class DataLayer:
         dfs = []
         for file in files:
             try:
-                if file.endswith('.zst'):
-                    # Decompress Zstandard file
-                    with open(file, 'rb') as f:
-                        dctx = zstd.ZstdDecompressor()
-                        data_buffer = dctx.decompress(f.read())
-                        csv_data = io.StringIO(data_buffer.decode('utf-8'))
-                        df = pd.read_csv(csv_data, parse_dates=['timestamp'])
-                else:
-                    # Regular CSV file
-                    df = pd.read_csv(file, parse_dates=['timestamp'])
-                
+                df = self._read_file(file)
                 dfs.append(df)
                 
                 # If database is available, also ingest each file
@@ -239,240 +195,248 @@ class DataLayer:
         combined_df = pd.concat(dfs, ignore_index=True)
         self._validate_and_process_data(combined_df)
     
+    def _find_files(self, directory: str, file_pattern: str) -> List[str]:
+        """Find files matching a pattern in a directory."""
+        search_path = os.path.join(directory, file_pattern)
+        files = sorted(glob.glob(search_path))
+        
+        # Try subdirectories if no files found
+        if not files:
+            for subdir in os.listdir(directory):
+                subdir_path = os.path.join(directory, subdir)
+                if os.path.isdir(subdir_path):
+                    search_path = os.path.join(subdir_path, file_pattern)
+                    subdir_files = sorted(glob.glob(search_path))
+                    files.extend(subdir_files)
+                    
+        return files
+    
     def _validate_and_process_data(self, df: pd.DataFrame) -> None:
-        """Validate and process loaded data.
+        """Validate and process loaded data."""
+        # Check if dataframe is empty
+        if df.empty:
+            raise ValueError("Data is empty")
+            
+        # Check required columns
+        required_cols = ['timestamp', 'symbol']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Required columns missing: {missing_cols}")
+            
+        # Sort by timestamp
+        df = df.sort_values('timestamp')
         
-        Args:
-            df: DataFrame with market data
-        """
-        required_columns = ['timestamp', 'symbol', 'open', 'high', 'low', 'close', 'volume']
-        for col in required_columns:
-            if col not in df.columns:
-                raise ValueError(f"Required column '{col}' not found in data")
-        
-        # Make sure timestamp is datetime
+        # Ensure timestamp is a datetime
         if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
             df['timestamp'] = pd.to_datetime(df['timestamp'])
         
-        # Sort by timestamp and symbol
-        df = df.sort_values(['timestamp', 'symbol']).reset_index(drop=True)
-        
-        # Store the data
+        # Store data in memory
         self.data = df
         
-        # Update symbols and date range
+        # Update derived properties
         self.symbols = set(df['symbol'].unique())
         self.date_range = (df['timestamp'].min(), df['timestamp'].max())
         
-        self.logger.info(f"Loaded {len(df)} data points for {len(self.symbols)} symbols "
-                        f"from {self.date_range[0].date()} to {self.date_range[1].date()}")
+        self.logger.info(f"Processed {len(df)} rows with {len(self.symbols)} symbols")
     
     def get_data_for_backtest(self, start: datetime, end: datetime, symbols: List[str] = None) -> pd.DataFrame:
-        """Get market data for backtesting in a vectorized format.
+        """Get data for a backtest period.
         
         Args:
-            start: Start date for the backtest
-            end: End date for the backtest
-            symbols: Optional list of symbols to include (if None, all symbols are included)
+            start: Start date
+            end: End date
+            symbols: Optional list of symbols to include
             
         Returns:
-            DataFrame with market data filtered by date range and symbols
+            DataFrame with market data
         """
-        # Try to use database if available
+        # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
-                data = self.db_manager.get_market_data(start, end, symbols)
-                
+                data = self.db_manager.get_market_data(start_date=start, end_date=end, symbols=symbols)
                 if not data.empty:
-                    self.logger.info(f"Retrieved {len(data)} rows from database for backtest")
                     return data
-                else:
-                    self.logger.warning("No data found in database, falling back to in-memory data")
             except Exception as e:
-                self.logger.error(f"Database query failed, falling back to in-memory data: {e}")
+                self.logger.warning(f"Failed to get data from database: {e}")
         
-        # Fall back to in-memory data
-        if not self.is_initialized():
-            raise ValueError("No data is loaded. Load data first.")
+        # Fall back to in-memory data if available
+        if self.data is not None:
+            # Filter by date range
+            filtered_data = self.data[
+                (self.data['timestamp'] >= pd.Timestamp(start)) & 
+                (self.data['timestamp'] <= pd.Timestamp(end))
+            ]
             
-        # Filter by date range
-        mask = (self.data['timestamp'] >= start) & (self.data['timestamp'] <= end)
-        data = self.data[mask]
-        
-        # Filter by symbols if specified
-        if symbols:
-            data = data[data['symbol'].isin(symbols)]
+            # Filter by symbols if provided
+            if symbols:
+                filtered_data = filtered_data[filtered_data['symbol'].isin(symbols)]
+                
+            return filtered_data
             
-        return data
+        # No data available
+        return pd.DataFrame()
     
     def get_unique_dates(self) -> pd.DatetimeIndex:
-        """Get unique dates in the dataset.
-        
-        Returns:
-            DatetimeIndex of unique dates
-        """
-        if self.use_database and self.db_manager:
-            try:
-                dates_df = self.db_manager.query_to_df("SELECT DISTINCT DATE_TRUNC('day', timestamp) as date FROM market_data ORDER BY date")
-                if not dates_df.empty:
-                    return pd.DatetimeIndex(dates_df['date'].values)
-            except Exception as e:
-                self.logger.error(f"Database query failed, falling back to in-memory data: {e}")
-        
-        # Fall back to in-memory data
-        if not self.is_initialized():
-            raise ValueError("No data is loaded. Load data first.")
+        """Get unique dates in the dataset."""
+        if self.data is None:
+            if self.use_database and self.db_manager:
+                try:
+                    dates = self.db_manager.get_available_dates()
+                    if not dates.empty:
+                        return pd.DatetimeIndex(pd.date_range(
+                            start=dates['start_date'].iloc[0],
+                            end=dates['end_date'].iloc[0]
+                        ))
+                except Exception:
+                    pass
+            return pd.DatetimeIndex([])
             
-        return pd.DatetimeIndex(self.data['timestamp'].dt.floor('D').unique()).sort_values()
+        # Get unique dates from timestamp column
+        return pd.DatetimeIndex(self.data['timestamp'].dt.floor('D').unique())
     
     def get_universe(self, date: datetime = None) -> List[str]:
         """Get the universe of available symbols.
         
         Args:
-            date: Optional date to get symbols available on that date
+            date: Optional date to filter symbols by availability
             
         Returns:
             List of symbols
         """
-        if self.use_database and self.db_manager:
-            try:
-                if date is None:
-                    symbols_df = self.db_manager.query_to_df("SELECT DISTINCT symbol FROM market_data ORDER BY symbol")
-                else:
-                    date_str = date.strftime("%Y-%m-%d")
-                    symbols_df = self.db_manager.query_to_df(
-                        f"SELECT DISTINCT symbol FROM market_data WHERE DATE_TRUNC('day', timestamp) = '{date_str}' ORDER BY symbol"
-                    )
-                
-                if not symbols_df.empty:
-                    return symbols_df['symbol'].tolist()
-            except Exception as e:
-                self.logger.error(f"Database query failed, falling back to in-memory data: {e}")
-        
-        # Fall back to in-memory data
-        if not self.is_initialized():
-            raise ValueError("No data is loaded. Load data first.")
-            
         if date is None:
             return sorted(list(self.symbols))
-        else:
-            # Get symbols available on the given date
-            date_start = pd.Timestamp(date.year, date.month, date.day)
-            date_end = date_start + pd.Timedelta(days=1)
             
-            symbols = self.data[(self.data['timestamp'] >= date_start) & 
-                              (self.data['timestamp'] < date_end)]['symbol'].unique()
+        # Filter data by date and return unique symbols
+        if self.data is not None:
+            date_floor = pd.Timestamp(date).floor('D')
+            date_ceil = pd.Timestamp(date).floor('D') + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            
+            symbols = self.data[
+                (self.data['timestamp'] >= date_floor) & 
+                (self.data['timestamp'] <= date_ceil)
+            ]['symbol'].unique()
+            
             return sorted(list(symbols))
-    
-    def get_available_date_range(self) -> Tuple[datetime, datetime]:
-        """Get the available date range in the dataset.
-        
-        Returns:
-            Tuple of (start_date, end_date)
-        """
-        if self.use_database and self.db_manager:
-            try:
-                dates_df = self.db_manager.get_available_dates()
-                if not dates_df.empty:
-                    return (dates_df['start_date'].iloc[0], dates_df['end_date'].iloc[0])
-            except Exception as e:
-                self.logger.error(f"Database query failed, falling back to in-memory data: {e}")
-        
-        # Fall back to in-memory data
-        if not self.is_initialized():
-            raise ValueError("No data is loaded. Load data first.")
             
-        return self.date_range
+        return []
     
-    def get_data_info(self) -> Dict[str, any]:
-        """Get information about the loaded data.
-        
-        Returns:
-            Dictionary with information about the data
-        """
+    def get_available_date_range(self) -> tuple:
+        """Get the available date range in the dataset."""
+        if self.date_range:
+            return self.date_range
+            
+        # Try to get from database
         if self.use_database and self.db_manager:
             try:
-                dates_df = self.db_manager.get_available_dates()
-                symbols_df = self.db_manager.get_available_symbols()
+                dates = self.db_manager.get_available_dates()
+                if not dates.empty:
+                    return (dates['start_date'].iloc[0], dates['end_date'].iloc[0])
+            except Exception:
+                pass
                 
-                if not dates_df.empty and not symbols_df.empty:
-                    return {
-                        "row_count": symbols_df['record_count'].sum(),
-                        "symbol_count": len(symbols_df),
-                        "start_date": dates_df['start_date'].iloc[0],
-                        "end_date": dates_df['end_date'].iloc[0],
-                        "day_count": dates_df['day_count'].iloc[0],
-                        "database_size_mb": round(self.db_manager.get_database_size() / (1024 * 1024), 2)
-                    }
-            except Exception as e:
-                self.logger.error(f"Database query failed, falling back to in-memory data: {e}")
+        # Use data if available
+        if self.data is not None and not self.data.empty:
+            return (self.data['timestamp'].min(), self.data['timestamp'].max())
+            
+        return (None, None)
+    
+    def get_data_info(self) -> Dict:
+        """Get information about loaded data."""
+        start_date, end_date = self.get_available_date_range()
         
-        # Fall back to in-memory data
-        if not self.is_initialized():
+        if start_date is None or end_date is None:
             return {
                 "row_count": 0,
                 "symbol_count": 0,
                 "start_date": None,
                 "end_date": None,
-                "day_count": 0,
-                "database_size_mb": 0
+                "days": 0
             }
-        
+            
+        # Calculate days
+        if pd.api.types.is_datetime64_any_dtype(start_date) and pd.api.types.is_datetime64_any_dtype(end_date):
+            days = (end_date - start_date).days + 1
+        else:
+            days = 0
+            
+        # Get row and symbol counts
+        if self.data is not None:
+            row_count = len(self.data)
+            symbol_count = len(self.symbols)
+        elif self.use_database and self.db_manager:
+            try:
+                # Get from database
+                symbols = self.db_manager.get_available_symbols()
+                symbol_count = len(symbols)
+                
+                # Estimate row count
+                row_count = symbol_count * days * 8  # Assuming ~8 data points per day per symbol
+            except Exception:
+                row_count = 0
+                symbol_count = 0
+        else:
+            row_count = 0
+            symbol_count = 0
+            
         return {
-            "row_count": len(self.data),
-            "symbol_count": len(self.symbols),
-            "start_date": self.date_range[0],
-            "end_date": self.date_range[1],
-            "day_count": len(self.data['timestamp'].dt.floor('D').unique()),
-            "database_size_mb": 0
+            "row_count": row_count,
+            "symbol_count": symbol_count,
+            "start_date": start_date,
+            "end_date": end_date,
+            "days": days
         }
     
     def ingest_to_database(self, df: pd.DataFrame, source_name: str) -> int:
-        """Ingest a DataFrame directly into the database.
-        
-        Args:
-            df: DataFrame with market data
-            source_name: Name of the data source
+        """Ingest data to the database."""
+        if not self.use_database or self.db_manager is None:
+            self.logger.warning("Database not available for ingestion")
+            return 0
             
-        Returns:
-            Number of rows ingested
-        """
-        if not self.use_database or not self.db_manager:
-            raise ValueError("Database is not available")
-            
-        return self.db_manager.ingest_data(df, source_name)
+        try:
+            rows_affected = self.db_manager.ingest_data(df, source_name)
+            self.logger.info(f"Ingested {rows_affected} rows into database")
+            return rows_affected
+        except Exception as e:
+            self.logger.error(f"Database ingestion failed: {e}")
+            return 0
     
     def ingest_ohlcv_file(self, file_path: str) -> int:
-        """Ingest an OHLCV file into the database.
-        
-        Args:
-            file_path: Path to the OHLCV file
+        """Ingest an OHLCV file into the database."""
+        if not self.use_database or self.db_manager is None:
+            self.logger.warning("Database not available for ingestion")
+            return 0
             
-        Returns:
-            Number of rows ingested
-        """
-        if not self.use_database or not self.db_manager:
-            raise ValueError("Database is not available")
-            
-        return self.db_manager.ingest_ohlcv_file(file_path)
+        try:
+            rows_affected = self.db_manager.ingest_ohlcv_file(file_path)
+            self.logger.info(f"Ingested {rows_affected} rows from OHLCV file")
+            return rows_affected
+        except Exception as e:
+            self.logger.error(f"OHLCV file ingestion failed: {e}")
+            return 0
     
     def ingest_ohlcv_directory(self, directory: str, max_files: int = None) -> int:
-        """Ingest all OHLCV files in a directory.
-        
-        Args:
-            directory: Directory containing OHLCV files
-            max_files: Maximum number of files to ingest
+        """Ingest OHLCV files from a directory into the database."""
+        if not self.use_database or self.db_manager is None:
+            self.logger.warning("Database not available for ingestion")
+            return 0
             
-        Returns:
-            Number of rows ingested
-        """
-        if not self.use_database or not self.db_manager:
-            raise ValueError("Database is not available")
-            
-        return self.db_manager.ingest_ohlcv_directory(directory, max_files=max_files)
+        try:
+            rows_affected = self.db_manager.ingest_ohlcv_directory(
+                directory=directory, 
+                pattern="*.ohlcv-1h.csv.zst", 
+                max_files=max_files
+            )
+            self.logger.info(f"Ingested {rows_affected} rows from OHLCV directory")
+            return rows_affected
+        except Exception as e:
+            self.logger.error(f"OHLCV directory ingestion failed: {e}")
+            return 0
     
     def close(self) -> None:
-        """Close all connections and clean up resources."""
+        """Close database connections."""
         if self.use_database and self.db_manager:
-            self.db_manager.close()
-            self.logger.info("Database connections closed")
+            try:
+                self.db_manager.close()
+                self.logger.info("Database connection closed")
+            except Exception as e:
+                self.logger.error(f"Error closing database connection: {e}")

@@ -21,7 +21,7 @@ plt.rcParams['figure.figsize'] = [12, 7]
 plt.rcParams['figure.dpi'] = 100
 
 
-def connect_to_database(db_path="data/vegas.duckdb"):
+def connect_to_database(db_path="db/vegas.duckdb"):
     """Connect to the Vegas DuckDB database.
     
     Args:
@@ -33,7 +33,7 @@ def connect_to_database(db_path="data/vegas.duckdb"):
     # Check if database exists
     if not os.path.exists(db_path):
         print(f"Database file not found: {db_path}")
-        print("Please ingest data first using: vegas ingest --file path/to/data.csv")
+        print("Please ingest data first using: vegas ingest-ohlcv --directory path/to/data")
         return None
     
     try:
@@ -62,7 +62,7 @@ def run_sql_query(conn, query):
     """
     try:
         result = conn.execute(query)
-        df = result.df()
+        df = result.fetchdf()
         return df
     except Exception as e:
         print(f"Error executing query: {e}")
@@ -192,7 +192,7 @@ def analyze_market_data(conn, output_dir="results"):
 
 def main():
     parser = argparse.ArgumentParser(description="DuckDB Market Data Analysis Example")
-    parser.add_argument("--db-path", default="data/vegas.duckdb", help="Path to DuckDB database")
+    parser.add_argument("--db-path", default="db/vegas.duckdb", help="Path to DuckDB database")
     parser.add_argument("--output-dir", default="results", help="Directory to save visualizations")
     args = parser.parse_args()
     

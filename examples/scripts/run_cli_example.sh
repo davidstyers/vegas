@@ -2,9 +2,8 @@
 # Example script demonstrating how to use the Vegas CLI
 
 # Set up variables
-STRATEGY_FILE="simple_ma_strategy.py"
-DATA_FILE="../data/sample_data.csv.zst"
-DATA_DIR="../data/us-equities"
+STRATEGY_FILE="examples/simple_ma_strategy.py"
+DATA_FILE="data/sample_data.csv.zst"
 START_DATE="2020-01-01"
 END_DATE="2021-01-01"
 OUTPUT_FILE="equity_curve.png"
@@ -17,7 +16,7 @@ echo
 # Check if the strategy file exists
 if [ ! -f "$STRATEGY_FILE" ]; then
     echo "Strategy file not found: $STRATEGY_FILE"
-    echo "Make sure you're running this script from the examples directory."
+    echo "Make sure you're running this script from the project root directory."
     exit 1
 fi
 
@@ -42,14 +41,12 @@ echo
 vegas run $STRATEGY_FILE --data-file $DATA_FILE --start $START_DATE --end $END_DATE --results-csv $RESULTS_CSV
 echo
 
-# Example 4: Run with data from a directory (if available)
-if [ -d "$DATA_DIR" ]; then
-    echo "Example 4: Running with data from a directory"
-    echo "Command: vegas run $STRATEGY_FILE --data-dir $DATA_DIR --start $START_DATE --end $END_DATE"
-    echo
-    vegas run $STRATEGY_FILE --data-dir $DATA_DIR --start $START_DATE --end $END_DATE
-    echo
-fi
+# Example 4: Generate QuantStats report
+echo "Example 4: Generating a QuantStats report"
+echo "Command: vegas run $STRATEGY_FILE --data-file $DATA_FILE --start $START_DATE --end $END_DATE --report strategy_report.html"
+echo
+vegas run $STRATEGY_FILE --data-file $DATA_FILE --start $START_DATE --end $END_DATE --report strategy_report.html
+echo
 
 # Example 5: Enable verbose logging
 echo "Example 5: Enabling verbose logging"
@@ -65,7 +62,5 @@ echo
 echo "Results:"
 echo "- Equity curve plot: $OUTPUT_FILE"
 echo "- Results CSV: $RESULTS_CSV"
-echo
-
-# Make the script executable
-chmod +x run_cli_example.sh 
+echo "- QuantStats report: strategy_report.html"
+echo 

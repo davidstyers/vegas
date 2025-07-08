@@ -8,8 +8,8 @@ import glob
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Tuple, Set
-from datetime import datetime, date
+from typing import Dict, List, Optional, Union, Tuple
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import pyarrow as pa
@@ -18,10 +18,7 @@ import duckdb
 
 
 class ParquetManager:
-    """Manager for Parquet file operations.
-    
-    This class handles converting market data to Parquet format and writing/reading files.
-    """
+    """Manager for Parquet file operations."""
     
     def __init__(self, data_dir: str = "db"):
         """Initialize the ParquetManager.
@@ -32,10 +29,8 @@ class ParquetManager:
         self.data_dir = data_dir
         self.logger = logging.getLogger("vegas.database.parquet")
         
-        # Create directory if it doesn't exist
+        # Create directories if they don't exist
         os.makedirs(self.data_dir, exist_ok=True)
-        
-        # Create partitioned directory if it doesn't exist
         os.makedirs(os.path.join(self.data_dir, "partitioned"), exist_ok=True)
     
     def write_dataframe_to_parquet(self, df: pd.DataFrame, file_path: str) -> str:
@@ -79,19 +74,10 @@ class ParquetManager:
         if missing_cols:
             raise ValueError(f"Partition columns not found in DataFrame: {missing_cols}")
         
-        # Create partitioned dataset
-        table = pa.Table.from_pandas(df)
-        
-        # Define the partition path
+        # Define the partition path and write partitioned dataset
         partition_path = os.path.join(self.data_dir, "partitioned")
-        
-        # Write partitioned dataset
-        pq.write_to_dataset(
-            table, 
-            partition_path,
-            partition_cols=partition_cols,
-            compression="snappy"
-        )
+        table = pa.Table.from_pandas(df)
+        pq.write_to_dataset(table, partition_path, partition_cols=partition_cols, compression="snappy")
         
         # Find all written files
         parquet_files = glob.glob(os.path.join(partition_path, "**", "*.parquet"), recursive=True)
@@ -148,10 +134,7 @@ class ParquetManager:
 
 
 class DatabaseManager:
-    """Manager for DuckDB operations.
-    
-    This class provides an interface to the DuckDB database for managing market data.
-    """
+    """Manager for DuckDB operations."""
     
     def __init__(self, db_path: str = "db/vegas.duckdb", parquet_dir: str = "db"):
         """Initialize the DatabaseManager.
@@ -182,7 +165,7 @@ class DatabaseManager:
             # Enable automatic loading of Parquet files
             self._conn.execute("INSTALL parquet; LOAD parquet;")
             
-            # Initialize database schema if needed
+            # Initialize database schema
             self._initialize_schema()
             
         except Exception as e:
@@ -191,36 +174,44 @@ class DatabaseManager:
     
     def _initialize_schema(self) -> None:
         """Initialize the database schema."""
-        # Create symbols table
-        self._conn.execute("""
-        CREATE TABLE IF NOT EXISTS symbols (
-            symbol VARCHAR PRIMARY KEY,
-            name VARCHAR,
-            exchange VARCHAR,
-            asset_type VARCHAR,
-            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        # Create data sources table
-        self._conn.execute("""
-        CREATE SEQUENCE IF NOT EXISTS data_sources_id_seq;
-        """)
-        
-        self._conn.execute("""
-        CREATE TABLE IF NOT EXISTS data_sources (
-            id INTEGER PRIMARY KEY DEFAULT nextval('data_sources_id_seq'),
-            source_name VARCHAR NOT NULL,
-            source_path VARCHAR NOT NULL,
-            format VARCHAR NOT NULL,
-            row_count INTEGER,
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
-            added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        # Create a view for market data - check if partitioned directory exists and has files
+        try:
+            # Create symbols table
+            self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS symbols (
+                symbol VARCHAR PRIMARY KEY,
+                name VARCHAR,
+                exchange VARCHAR,
+                asset_type VARCHAR,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            
+            # Create data sources table
+            self._conn.execute("CREATE SEQUENCE IF NOT EXISTS data_sources_id_seq;")
+            self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS data_sources (
+                id INTEGER PRIMARY KEY DEFAULT nextval('data_sources_id_seq'),
+                source_name VARCHAR NOT NULL,
+                source_path VARCHAR NOT NULL,
+                format VARCHAR NOT NULL,
+                row_count INTEGER,
+                start_date TIMESTAMP,
+                end_date TIMESTAMP,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            
+            # Create market_data view
+            self._create_market_data_view()
+            
+            self.logger.info("Database schema initialized")
+        except Exception as e:
+            self.logger.error(f"Error initializing schema: {e}")
+            raise
+    
+    def _create_market_data_view(self) -> None:
+        """Create or update the market_data view."""
+        # Check if partitioned directory exists and has files
         partitioned_dir = os.path.abspath(os.path.join(os.path.dirname(self.db_path), "partitioned"))
         parquet_files = glob.glob(os.path.join(partitioned_dir, "**", "*.parquet"), recursive=True)
         
@@ -238,8 +229,6 @@ class DatabaseManager:
         else:
             self.logger.info("No Parquet files found, creating empty market_data view")
             self._create_empty_market_data_view()
-        
-        self.logger.info("Database schema initialized")
     
     def _create_empty_market_data_view(self) -> None:
         """Create an empty market_data view."""
@@ -248,343 +237,321 @@ class DatabaseManager:
         SELECT 
             CAST(NULL AS TIMESTAMP) as timestamp,
             CAST(NULL AS VARCHAR) as symbol,
-            CAST(NULL AS DOUBLE) as open,
-            CAST(NULL AS DOUBLE) as high,
-            CAST(NULL AS DOUBLE) as low,
-            CAST(NULL AS DOUBLE) as close,
-            CAST(NULL AS BIGINT) as volume,
-            CAST(NULL AS INTEGER) as year,
-            CAST(NULL AS INTEGER) as month
-        WHERE 1=0
+            CAST(NULL AS FLOAT) as open,
+            CAST(NULL AS FLOAT) as high,
+            CAST(NULL AS FLOAT) as low,
+            CAST(NULL AS FLOAT) as close,
+            CAST(NULL AS INTEGER) as volume
+        WHERE FALSE
         """)
+        self.logger.info("Created empty market_data view")
     
     def close(self) -> None:
         """Close the database connection."""
         if self._conn:
-            self._conn.close()
-            self._conn = None
-            self.logger.info("Database connection closed")
+            try:
+                self._conn.close()
+                self._conn = None
+                self.logger.info("Database connection closed")
+            except Exception as e:
+                self.logger.error(f"Error closing database connection: {e}")
     
     def execute_query(self, query: str, parameters: tuple = ()) -> duckdb.DuckDBPyRelation:
-        """Execute a SQL query on the DuckDB connection.
+        """Execute a SQL query and return the result relation.
         
         Args:
             query: SQL query to execute
-            parameters: Query parameters
+            parameters: Optional tuple of parameters for the query
             
         Returns:
-            DuckDB query result
+            DuckDB relation object with query results
         """
         if not self._conn:
             self.connect()
             
         try:
-            result = self._conn.execute(query, parameters)
-            return result
+            return self._conn.execute(query, parameters)
         except Exception as e:
-            self.logger.error(f"Query execution error: {e}")
+            self.logger.error(f"Query execution failed: {e}\nQuery: {query}")
             raise
     
     def query_to_df(self, query: str, parameters: tuple = ()) -> pd.DataFrame:
-        """Execute a query and return the result as a DataFrame.
+        """Execute a SQL query and return results as a DataFrame.
         
         Args:
             query: SQL query to execute
-            parameters: Query parameters
+            parameters: Optional tuple of parameters for the query
             
         Returns:
             DataFrame with query results
         """
-        result = self.execute_query(query, parameters)
-        return result.df()
+        try:
+            result = self.execute_query(query, parameters)
+            return result.fetchdf()
+        except Exception as e:
+            self.logger.error(f"Failed to convert query results to DataFrame: {e}")
+            return pd.DataFrame()
     
     def ingest_data(self, df: pd.DataFrame, source_name: str) -> int:
-        """Ingest data into the database via Parquet files.
+        """Ingest market data into the database.
         
         Args:
             df: DataFrame with market data
-            source_name: Name of the data source
+            source_name: Name or identifier for the data source
             
         Returns:
             Number of rows ingested
         """
         if df.empty:
-            self.logger.warning("Empty DataFrame provided, nothing to ingest")
+            self.logger.warning(f"Empty DataFrame provided for source {source_name}, nothing to ingest")
             return 0
         
-        # Check if this source has already been ingested
-        try:
-            existing_sources = self.query_to_df("SELECT * FROM data_sources WHERE source_name = ?", (source_name,))
-            if not existing_sources.empty:
-                self.logger.warning(f"Data source '{source_name}' has already been ingested. Skipping to prevent duplicate data.")
-                return 0
-        except Exception as e:
-            # If the data_sources table doesn't exist yet, this is the first run after deleting the DB
-            self.logger.debug(f"Error checking for existing sources: {e}")
-            # Continue with ingestion
-        
-        # Validate required columns for market data
-        required_columns = ['timestamp', 'symbol', 'open', 'high', 'low', 'close']
+        required_columns = ['timestamp', 'symbol']
         for col in required_columns:
             if col not in df.columns:
-                raise ValueError(f"Required column '{col}' not found in data: {df.columns}")
+                raise ValueError(f"Required column '{col}' not found in data for source {source_name}")
         
-        # Make sure timestamp is datetime
-        if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Create year and month columns for partitioning
-        df['year'] = df['timestamp'].dt.year
-        df['month'] = df['timestamp'].dt.month
-        
-        # Write the data to Parquet files, partitioned by year and month
-        # This reduces the number of partitions compared to year/date/symbol
-        parquet_files = self.parquet_manager.write_data_partitioned(df, partition_cols=['year', 'month'])
-        
-        # Update the symbols table
-        symbols = df['symbol'].unique().tolist()
-        if symbols:
-            values = ", ".join(f"('{symbol}')" for symbol in symbols)
-            
-            self._conn.execute(f"""
-            INSERT OR IGNORE INTO symbols (symbol)
-            VALUES {values}
-            """)
-        
-        # Add an entry to the data sources table
-        self._conn.execute("""
-        INSERT INTO data_sources (source_name, source_path, format, row_count, start_date, end_date)
-        VALUES (?, 'db/partitioned', 'parquet', ?, ?, ?)
-        """, (source_name, len(df), df['timestamp'].min(), df['timestamp'].max()))
-        
-        # Try to refresh the market data view using absolute paths
         try:
-            # Get the absolute path to the partitioned directory
-            partitioned_dir = os.path.abspath(os.path.join(os.path.dirname(self.db_path), "partitioned"))
+            # Ensure timestamp is a datetime
+            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                
+            # Add year and month columns for partitioning
+            df['year'] = df['timestamp'].dt.year
+            df['month'] = df['timestamp'].dt.month
             
-            # Create the view using the entire partitioned directory with a wildcard
-            self._conn.execute(f"""
-            CREATE OR REPLACE VIEW market_data AS
-            SELECT * FROM parquet_scan('{partitioned_dir}/**/*.parquet')
-            """)
-            self.logger.info(f"Created market_data view using {partitioned_dir}/**/*.parquet")
+            # Add partition path
+            source_path = f"ingested/{source_name.replace('.', '_')}"
+            
+            # Write partitioned data
+            partition_cols = ['year', 'month', 'symbol']
+            self.parquet_manager.write_data_partitioned(df, partition_cols)
+            
+            # Record the data source
+            min_date = df['timestamp'].min()
+            max_date = df['timestamp'].max()
+            
+            # Insert or update data source record
+            self._conn.execute("""
+            INSERT INTO data_sources (source_name, source_path, format, row_count, start_date, end_date)
+            VALUES (?, ?, 'parquet', ?, ?, ?)
+            """, (source_name, source_path, len(df), min_date, max_date))
+            
+            # Insert symbols if they don't exist
+            symbols = df['symbol'].unique()
+            for symbol in symbols:
+                self._conn.execute("""
+                INSERT INTO symbols (symbol) VALUES (?)
+                ON CONFLICT (symbol) DO NOTHING
+                """, (symbol,))
+            
+            # Refresh the market_data view to include the new data
+            self._create_market_data_view()
+            
+            self.logger.info(f"Ingested {len(df)} rows from {source_name}")
+            return len(df)
+            
         except Exception as e:
-            self.logger.warning(f"Failed to refresh market_data view: {e}")
-            # Create an empty view if the refresh fails
-            self._create_empty_market_data_view()
-        
-        self.logger.info(f"Ingested {len(df)} rows from {source_name}")
-        return len(df)
+            self.logger.error(f"Data ingestion failed for {source_name}: {e}")
+            raise
     
     def ingest_ohlcv_file(self, file_path: str) -> int:
         """Ingest an OHLCV file into the database.
         
         Args:
-            file_path: Path to the OHLCV file
+            file_path: Path to OHLCV file (.ohlcv-1h.csv.zst format)
             
         Returns:
             Number of rows ingested
         """
-        import zstandard as zstd
-        import io
-        
-        # Check if file exists
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        # Check if file is an OHLCV file
+            raise FileNotFoundError(f"OHLCV file not found: {file_path}")
+            
         if not file_path.endswith('.ohlcv-1h.csv.zst'):
-            raise ValueError(f"Not an OHLCV file: {file_path}")
+            raise ValueError(f"Invalid OHLCV file format for {file_path}. Expected .ohlcv-1h.csv.zst")
+            
+        self.logger.info(f"Ingesting OHLCV file: {file_path}")
         
-        # Extract date from filename
-        match = re.search(r'(\d{8})\.ohlcv-1h\.csv\.zst$', file_path)
-        if not match:
-            raise ValueError(f"Could not extract date from filename: {file_path}")
-        
-        date_str = match.group(1)
-        source_name = os.path.basename(file_path)
-        
-        # Check if this file has already been ingested
         try:
-            existing_sources = self.query_to_df("SELECT * FROM data_sources WHERE source_name = ?", (source_name,))
-            if not existing_sources.empty:
-                self.logger.warning(f"File {source_name} has already been ingested. Skipping to prevent duplicate data.")
-                return 0
+            # Decompress the file
+            import zstandard as zstd
+            import io
+            import csv
+            
+            with open(file_path, 'rb') as f:
+                dctx = zstd.ZstdDecompressor()
+                data_buffer = dctx.decompress(f.read())
+                csv_data = io.StringIO(data_buffer.decode('utf-8'))
+                
+                # Load CSV data
+                df = pd.read_csv(csv_data)
+                
+                # Validate required columns
+                required_columns = ['ts_event', 'symbol', 'open', 'high', 'low', 'close', 'volume']
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                if missing_columns:
+                    raise ValueError(f"Missing required columns in OHLCV file: {missing_columns}")
+                
+                # Rename ts_event to timestamp for consistency
+                df = df.rename(columns={'ts_event': 'timestamp'})
+                
+                # Ensure timestamp is datetime
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                
+                # Get source name from filename
+                source_name = os.path.basename(file_path)
+                
+                # Ingest the data
+                return self.ingest_data(df, source_name)
+                
         except Exception as e:
-            # If the data_sources table doesn't exist yet, this is the first run after deleting the DB
-            self.logger.debug(f"Error checking for existing sources: {e}")
-            # Continue with ingestion
-        
-        # Decompress and read the file
-        self.logger.info(f"Reading OHLCV file: {file_path}")
-        
-        # Use subprocess to call zstdcat directly
-        import subprocess
-        import tempfile
-        
-        self.logger.info(f"Using zstdcat to decompress {file_path}")
-        try:
-            # Create a temporary file to store the decompressed data
-            with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            # Use zstdcat to decompress the file
-            cmd = f"zstdcat {file_path} > {temp_path}"
-            subprocess.run(cmd, shell=True, check=True)
-            
-            # Read the decompressed file
-            self.logger.info(f"Reading decompressed file from {temp_path}")
-            df = pd.read_csv(temp_path)
-            self.logger.info(f"Read {len(df)} rows from {temp_path}")
-            
-            # Clean up
-            os.unlink(temp_path)
-            
-            # Process the data
-            self.logger.info(f"Processing {len(df)} rows from {file_path}")
-            
-            # Rename columns to match our schema
-            df = df.rename(columns={
-                'ts_event': 'timestamp',
-                'close': 'close',
-                'high': 'high',
-                'low': 'low',
-                'open': 'open',
-                'volume': 'volume',
-                'symbol': 'symbol'
-            })
-            
-            # Convert timestamp to datetime
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # Ingest the data
-            return self.ingest_data(df, source_name)
-        except Exception as e:
-            self.logger.error(f"Error processing OHLCV file {file_path}: {e}")
-            raise ValueError(f"Failed to process OHLCV file {file_path}: {e}")
+            self.logger.error(f"Failed to ingest OHLCV file {file_path}: {e}")
+            raise
     
     def ingest_ohlcv_directory(self, directory: str = "data", pattern: str = "*.ohlcv-1h.csv.zst", max_files: int = None) -> int:
         """Ingest all OHLCV files in a directory.
         
         Args:
             directory: Directory containing OHLCV files
-            pattern: Pattern for matching OHLCV files
+            pattern: Glob pattern for matching files
             max_files: Maximum number of files to ingest
             
         Returns:
-            Number of rows ingested
+            Total number of rows ingested
         """
-        # Find all OHLCV files
+        if not os.path.exists(directory) or not os.path.isdir(directory):
+            raise FileNotFoundError(f"Directory not found: {directory}")
+            
+        # Find all matching files
         search_path = os.path.join(directory, pattern)
-        files = sorted(glob.glob(search_path))
+        files = sorted(glob.glob(search_path, recursive=True))
         
         if not files:
-            raise FileNotFoundError(f"No OHLCV files found in {directory} with pattern {pattern}")
+            # Check subdirectories if no files found
+            for root, _, _ in os.walk(directory):
+                search_path = os.path.join(root, pattern)
+                subdir_files = sorted(glob.glob(search_path))
+                files.extend(subdir_files)
         
+        if not files:
+            self.logger.warning(f"No OHLCV files found in {directory} with pattern {pattern}")
+            return 0
+            
         # Limit the number of files if specified
         if max_files:
             files = files[:max_files]
-        
+            
         self.logger.info(f"Found {len(files)} OHLCV files to ingest")
         
         # Ingest each file
         total_rows = 0
-        skipped_files = 0
-        
-        for file in files:
+        success_count = 0
+        for file_path in files:
             try:
-                rows = self.ingest_ohlcv_file(file)
-                if rows > 0:
-                    total_rows += rows
-                    self.logger.info(f"Ingested {rows} rows from {file}")
-                else:
-                    skipped_files += 1
+                rows = self.ingest_ohlcv_file(file_path)
+                total_rows += rows
+                success_count += 1
+                self.logger.info(f"Successfully ingested {file_path}: {rows} rows")
             except Exception as e:
-                self.logger.error(f"Error ingesting file {file}: {e}")
+                self.logger.error(f"Failed to ingest {file_path}: {e}")
         
-        if skipped_files > 0:
-            self.logger.info(f"Skipped {skipped_files} files that were already ingested")
-            
+        self.logger.info(f"Ingested {total_rows} rows from {success_count}/{len(files)} OHLCV files")
         return total_rows
     
     def get_available_dates(self) -> pd.DataFrame:
-        """Get the range of available dates in the database.
+        """Get the date range and day count available in the database.
         
         Returns:
-            DataFrame with date statistics
+            DataFrame with start_date, end_date, and day_count
         """
         try:
-            return self.query_to_df("""
+            result = self.query_to_df("""
             SELECT 
                 MIN(timestamp) as start_date,
                 MAX(timestamp) as end_date,
                 COUNT(DISTINCT DATE_TRUNC('day', timestamp)) as day_count
             FROM market_data
             """)
+            
+            # Handle case where no data is available
+            if result.empty or pd.isna(result['start_date'].iloc[0]):
+                return pd.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
+                
+            return result
         except Exception as e:
-            self.logger.error(f"Error getting available dates: {e}")
-            # Return empty DataFrame with expected columns
-            return pd.DataFrame({
-                'start_date': [None],
-                'end_date': [None],
-                'day_count': [0]
-            })
+            self.logger.error(f"Failed to get available dates: {e}")
+            return pd.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
     
     def get_available_symbols(self) -> pd.DataFrame:
-        """Get the list of available symbols in the database.
+        """Get the symbols available in the database.
         
         Returns:
-            DataFrame with symbol statistics
+            DataFrame with symbols and their record counts
         """
         try:
             return self.query_to_df("""
             SELECT 
                 symbol,
-                COUNT(*) as record_count,
-                MIN(timestamp) as first_date,
-                MAX(timestamp) as last_date
+                COUNT(*) as record_count
             FROM market_data
             GROUP BY symbol
             ORDER BY symbol
             """)
         except Exception as e:
-            self.logger.error(f"Error getting available symbols: {e}")
-            return pd.DataFrame()
+            self.logger.error(f"Failed to get available symbols: {e}")
+            return pd.DataFrame(columns=['symbol', 'record_count'])
     
     def get_market_data(self, start_date: datetime = None, end_date: datetime = None, 
-                       symbols: List[str] = None) -> pd.DataFrame:
-        """Query market data with optional filters.
+                      symbols: List[str] = None) -> pd.DataFrame:
+        """Query market data from the database.
         
         Args:
             start_date: Optional start date filter
             end_date: Optional end date filter
-            symbols: Optional list of symbols to include
+            symbols: Optional list of symbols to filter by
             
         Returns:
             DataFrame with market data
         """
-        query = "SELECT * FROM market_data WHERE 1=1"
-        params = []
-        
-        if start_date:
-            query += " AND timestamp >= ?"
-            params.append(start_date)
+        try:
+            query = "SELECT * FROM market_data"
+            conditions = []
+            params = []
             
-        if end_date:
-            query += " AND timestamp <= ?"
-            params.append(end_date)
+            if start_date:
+                conditions.append("timestamp >= ?")
+                params.append(start_date)
+                
+            if end_date:
+                conditions.append("timestamp <= ?")
+                params.append(end_date)
+                
+            if symbols and len(symbols) > 0:
+                # For better performance with many symbols, use IN clause
+                if len(symbols) <= 10:
+                    symbols_list = ", ".join([f"'{s}'" for s in symbols])
+                    conditions.append(f"symbol IN ({symbols_list})")
+                else:
+                    # For many symbols, create a temporary table and join
+                    self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_symbols (symbol VARCHAR)")
+                    self._conn.execute("DELETE FROM temp_symbols")
+                    for symbol in symbols:
+                        self._conn.execute("INSERT INTO temp_symbols VALUES (?)", (symbol,))
+                    conditions.append("symbol IN (SELECT symbol FROM temp_symbols)")
             
-        if symbols and len(symbols) > 0:
-            placeholders = ", ".join(["?"] * len(symbols))
-            query += f" AND symbol IN ({placeholders})"
-            params.extend(symbols)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+                
+            query += " ORDER BY timestamp, symbol"
             
-        query += " ORDER BY timestamp, symbol"
-        
-        return self.query_to_df(query, tuple(params))
+            return self.query_to_df(query, tuple(params))
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get market data: {e}")
+            return pd.DataFrame()
     
     def get_data_sources(self) -> pd.DataFrame:
-        """Get information about ingested data sources.
+        """Get information about data sources in the database.
         
         Returns:
             DataFrame with data source information
@@ -595,7 +562,7 @@ class DatabaseManager:
         """Get the size of the database file in bytes.
         
         Returns:
-            Size of database file in bytes
+            Database file size in bytes
         """
         if os.path.exists(self.db_path):
             return os.path.getsize(self.db_path)

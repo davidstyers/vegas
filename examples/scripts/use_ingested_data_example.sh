@@ -3,7 +3,7 @@
 
 # First, ingest some sample data (this could be done separately)
 echo "Step 1: Ingesting sample data..."
-vegas run examples/simple_ma_strategy.py --data-file data/sample_data.csv.zst --start 2020-01-01 --end 2020-01-02
+vegas ingest --file data/sample_data.csv.zst
 
 # Now run without specifying a data file, using the already ingested data
 echo

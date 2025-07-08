@@ -26,9 +26,9 @@ vegas ingest --file $SAMPLE_DATA
 # Step 2: Check database status
 echo
 echo "Step 2: Checking database status..."
-echo "Command: vegas db-status --detailed --show-symbols --limit 5"
+echo "Command: vegas db-status --detailed"
 echo
-vegas db-status --detailed --show-symbols --limit 5
+vegas db-status --detailed
 
 # Step 3: Run a SQL query on the database
 echo

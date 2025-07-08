@@ -29,9 +29,9 @@ vegas ingest-ohlcv --directory $DATA_DIR --max-files 5
 # Step 2: Check database status
 echo
 echo "Step 2: Checking database status..."
-echo "Command: vegas db-status --detailed --show-symbols --limit 10"
+echo "Command: vegas db-status --detailed"
 echo
-vegas db-status --detailed --show-symbols --limit 10
+vegas db-status --detailed
 
 # Step 3: Run a SQL query on the database
 echo
@@ -50,4 +50,4 @@ vegas run examples/simple_ma_strategy.py --start 2018-05-01 --end 2018-05-31
 echo
 echo "OHLCV ingestion example completed!"
 echo "The Vegas backtesting engine now stores OHLCV data in Parquet format in the db directory."
-echo "Data is partitioned by year and month for efficient querying." 
+echo "Data is partitioned by year, month, and symbol for efficient querying." 

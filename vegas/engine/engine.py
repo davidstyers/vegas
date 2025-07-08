@@ -3,16 +3,14 @@
 This module provides a minimal, vectorized backtesting engine.
 """
 
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
-import numpy as np
 import time
 import logging
-import os
 
 from vegas.data import DataLayer
-from vegas.strategy import Strategy, Context, Signal
+from vegas.strategy import Strategy, Context
 from vegas.portfolio import Portfolio
 
 
@@ -25,30 +23,24 @@ class BacktestEngine:
         Args:
             data_dir: Directory for storing data files
         """
-        self._logger = self._setup_logger()
+        self._logger = logging.getLogger('vegas.engine')
+        self._logger.setLevel(logging.INFO)
+        
+        if not self._logger.handlers:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(formatter)
+            self._logger.addHandler(console_handler)
+            
         self._logger.info(f"Initializing BacktestEngine with data directory: {data_dir}")
         
         self.data_layer = DataLayer(data_dir)
         self.strategy = None
         self.portfolio = None
     
-    def _setup_logger(self) -> logging.Logger:
-        """Set up logger for the backtest engine."""
-        logger = logging.getLogger('vegas.engine')
-        logger.setLevel(logging.INFO)
-        
-        # Create console handler if not already exists
-        if not logger.handlers:
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            console_handler.setFormatter(formatter)
-            logger.addHandler(console_handler)
-            
-        return logger
-        
-    def load_data(self, file_path: str = None, directory: str = None, file_pattern: str = None, 
-                 max_files: int = None) -> None:
+    def load_data(self, file_path: str = None, directory: str = None, 
+                 file_pattern: str = None, max_files: int = None) -> None:
         """Load market data for backtesting.
         
         Args:
@@ -57,6 +49,7 @@ class BacktestEngine:
             file_pattern: Optional pattern for matching multiple files
             max_files: Optional limit on number of files to load
         """
+        # Handle loading data based on provided parameters
         if file_path:
             self._logger.info(f"Loading data from single file: {file_path}")
             self.data_layer.load_data(file_path)
@@ -68,10 +61,7 @@ class BacktestEngine:
                 max_files=max_files
             )
         elif not self.data_layer.is_initialized():
-            raise ValueError(
-                "No data source specified and no data is currently loaded. "
-                "Either provide a file_path, directory, or ensure data is already loaded."
-            )
+            raise ValueError("No data source specified and no data is currently loaded.")
         else:
             self._logger.info("Using already loaded data")
             
@@ -116,18 +106,15 @@ class BacktestEngine:
         
         # Execute vectorized backtest
         self._logger.info("Executing vectorized backtest")
-        results = self._run_vectorized_backtest(market_data, context)
+        self._run_vectorized_backtest(market_data, context)
         
         # Calculate execution time
         execution_time = time.time() - start_time
         self._logger.info(f"Backtest completed in {execution_time:.2f} seconds")
         
-        # Get final statistics
-        stats = self.portfolio.get_stats()
-        
         # Create results dictionary
         results_dict = {
-            'stats': stats,
+            'stats': self.portfolio.get_stats(),
             'equity_curve': self.portfolio.get_equity_curve(),
             'transactions': self.portfolio.get_transactions(),
             'positions': self.portfolio.get_positions(),
@@ -140,25 +127,27 @@ class BacktestEngine:
         
         return results_dict
     
-    def _run_vectorized_backtest(self, market_data: pd.DataFrame, context: Context) -> Dict[str, Any]:
+    def _run_vectorized_backtest(self, market_data: pd.DataFrame, context: Context) -> None:
         """Run the vectorized backtest algorithm.
         
         Args:
             market_data: DataFrame with market data for the backtest period
             context: Strategy context
-            
-        Returns:
-            Dictionary with backtest results
         """
-        # Step 1: Generate signals using the vectorized strategy method
+        # Generate signals using the vectorized strategy method
         self._logger.info("Generating trading signals")
-        signals_df = self.strategy.generate_signals_vectorized(context, market_data)
+        
+        try:
+            signals_df = self.strategy.generate_signals_vectorized(context, market_data)
+        except Exception as e:
+            self._logger.error(f"Error generating signals: {e}")
+            signals_df = pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
         
         if signals_df.empty:
             self._logger.warning("No signals generated by the strategy")
-            return {}
+            return
         
-        # Step 2: Execute signals and update portfolio
+        # Process data timestamp by timestamp
         self._logger.info("Executing signals and updating portfolio")
         
         # Sort data by timestamp for sequential processing
@@ -168,34 +157,22 @@ class BacktestEngine:
         # Get unique timestamps
         timestamps = market_data['timestamp'].unique()
         
-        # Process data timestamp by timestamp
+        # Process each timestamp
         for timestamp in timestamps:
-            # Get data for current timestamp
             current_data = market_data[market_data['timestamp'] == timestamp]
-            
-            # Get signals for current timestamp
             current_signals = signals_df[signals_df['timestamp'] == timestamp]
             
             # Execute signals and create transactions
+            transactions = pd.DataFrame()
             if not current_signals.empty:
-                # Convert signals to transactions (in real implementation, this would include 
-                # slippage, commission, and execution logic)
                 transactions = self._create_transactions_from_signals(current_signals, current_data)
                 
-                # Update portfolio with transactions
-                if not transactions.empty:
-                    self.portfolio.update_from_transactions(timestamp, transactions, current_data)
-            else:
-                # Update portfolio with current market data only (no transactions)
-                self.portfolio.update_from_transactions(timestamp, pd.DataFrame(), current_data)
-        
-        return {}
+            # Update portfolio with transactions (or empty DataFrame if no transactions)
+            self.portfolio.update_from_transactions(timestamp, transactions, current_data)
     
     def _create_transactions_from_signals(self, signals: pd.DataFrame, 
                                          market_data: pd.DataFrame) -> pd.DataFrame:
         """Convert signals to transactions.
-        
-        In a real implementation, this would include slippage, commission, and execution logic.
         
         Args:
             signals: DataFrame with signals
@@ -218,14 +195,14 @@ class BacktestEngine:
             if symbol not in price_lookup:
                 continue
                 
-            # Get execution price (with optional slippage model)
-            price = price_lookup[symbol]
+            # Get execution price
+            price = signal.get('price') or price_lookup[symbol]
             
             # Convert action to quantity (positive for buy, negative for sell)
             if action.lower() == 'sell':
                 quantity = -abs(quantity)
                 
-            # Add a simplified commission (could be enhanced with a commission model)
+            # Add a simplified commission
             commission = abs(quantity * price * 0.001)  # 0.1% commission
             
             transactions.append({
@@ -243,11 +220,9 @@ class BacktestEngine:
             'stats': {
                 'total_return': 0.0,
                 'total_return_pct': 0.0,
-                'sharpe_ratio': 0.0,
-                'max_drawdown': 0.0,
                 'num_trades': 0
             },
-            'equity_curve': pd.DataFrame(),
+            'equity_curve': pd.DataFrame(columns=['timestamp', 'equity', 'cash']),
             'transactions': pd.DataFrame(),
             'positions': pd.DataFrame(),
             'execution_time': 0.0,

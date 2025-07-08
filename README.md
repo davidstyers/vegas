@@ -214,6 +214,25 @@ See the `docs` directory for more detailed documentation:
 - [Benchmark Guide](docs/benchmark_guide.md)
 - [Database System](docs/database_system.md)
 
+## Testing
+
+Vegas comes with a comprehensive test suite covering all aspects of the backtesting engine:
+
+```bash
+# Run all tests
+cd tests && ./run_all_tests.py
+
+# Run specific test categories
+cd tests && ./run_all_tests.py --type core
+cd tests && ./run_all_tests.py --type integration
+cd tests && ./run_all_tests.py --type specialized
+
+# Generate code coverage report
+cd tests && ./run_all_tests.py --coverage
+```
+
+See `tests/README.md` for detailed information about the test suite.
+
 ## License
 
 MIT License. See LICENSE file for details. 
