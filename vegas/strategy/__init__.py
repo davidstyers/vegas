@@ -1,4 +1,4 @@
-"""Strategy Layer for the Vegas backtesting engine."""
+"""Strategy implementation for the Vegas backtesting engine."""
 
 from vegas.strategy.strategy import Strategy, Signal, Context
 

@@ -85,39 +85,8 @@ class TestEventDriven:
         """Set up test fixtures."""
         self.data_layer = MockDataLayer()
     
-    def test_event_driven_detection(self):
-        """Test detection of event-driven strategies."""
-        engine = BacktestEngine()
-        
-        # Replace data layer with mock
-        engine.data_layer = self.data_layer
-        
-        # Strategy with no event methods
-        class VectorizedStrategy(Strategy):
-            def generate_signals_vectorized(self, context, data):
-                return pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
-        
-        # Strategy with event method
-        class EventDrivenStrategy(Strategy):
-            def before_trading_start(self, context, data):
-                context.signal = True
-                
-            def handle_data(self, context, data):
-                return []
-        
-        # Test detection
-        vectorized_strategy = VectorizedStrategy()
-        event_strategy = EventDrivenStrategy()
-        
-        assert engine._requires_event_driven(vectorized_strategy) is False
-        assert engine._requires_event_driven(event_strategy) is True
-        
-        # Test explicit flag
-        vectorized_strategy.is_event_driven = True
-        assert engine._requires_event_driven(vectorized_strategy) is True
-    
-    def test_event_driven_execution(self):
-        """Test execution of event-driven backtest."""
+    def test_event_handler_execution(self):
+        """Test execution of event handlers in event-driven backtesting."""
         engine = BacktestEngine()
         
         # Replace data layer with mock
@@ -155,7 +124,7 @@ class TestEventDriven:
         end_date = datetime(2020, 1, 5)
         strategy = EventTrackingStrategy()
         
-        results = engine.run(start_date, end_date, strategy, event_driven=True)
+        results = engine.run(start_date, end_date, strategy)
         
         # Check that events were triggered
         context = strategy.context
@@ -200,7 +169,7 @@ class TestEventDriven:
         end_date = datetime(2020, 1, 2)
         strategy = SignalStrategy()
         
-        results = engine.run(start_date, end_date, strategy, event_driven=True)
+        results = engine.run(start_date, end_date, strategy)
         
         # Check transactions were generated
         transactions = results['transactions']
@@ -208,26 +177,10 @@ class TestEventDriven:
         assert any(transactions['symbol'] == 'AAPL')
         assert transactions['quantity'].sum() > 0
     
-    def test_event_vs_vectorized_same_result(self):
-        """Test that event and vectorized modes give similar results for equivalent strategies."""
-        # Create compatible strategy implementations
-        class VectorizedStrategy(Strategy):
-            def generate_signals_vectorized(self, context, data):
-                # Buy AAPL at first timestamp
-                aapl_data = data[data['symbol'] == 'AAPL'].sort_values('timestamp')
-                if aapl_data.empty:
-                    return pd.DataFrame()
-                
-                first_price = aapl_data.iloc[0]['close']
-                return pd.DataFrame([{
-                    'timestamp': aapl_data.iloc[0]['timestamp'],
-                    'symbol': 'AAPL',
-                    'action': 'buy',
-                    'quantity': 10,
-                    'price': first_price
-                }])
-        
-        class EventStrategy(Strategy):
+    def test_equivalent_strategies(self):
+        """Test that different strategy implementations with same logic give similar results."""
+        # Create two equivalent strategies with different implementation approaches
+        class StrategyA(Strategy):
             def initialize(self, context):
                 context.bought = False
                 
@@ -239,27 +192,39 @@ class TestEventDriven:
                     return [Signal(symbol='AAPL', action='buy', quantity=10, price=price)]
                 return []
         
-        # Run both strategies
-        engine_vec = BacktestEngine()
-        engine_vec.data_layer = self.data_layer
+        class StrategyB(Strategy):
+            def initialize(self, context):
+                context.bought = False
+            
+            def on_market_open(self, context, data, portfolio):
+                if not context.bought and 'AAPL' in data['symbol'].values:
+                    context.bought = True
+            
+            def handle_data(self, context, data):
+                if context.bought and 'AAPL' in data['symbol'].values:
+                    from vegas.strategy import Signal
+                    price = data[data['symbol'] == 'AAPL']['close'].iloc[0]
+                    context.bought = False  # Prevent multiple buys
+                    return [Signal(symbol='AAPL', action='buy', quantity=10, price=price)]
+                return []
         
-        engine_event = BacktestEngine()
-        engine_event.data_layer = self.data_layer
+        # Run both strategies
+        engine_a = BacktestEngine()
+        engine_a.data_layer = self.data_layer
+        
+        engine_b = BacktestEngine()
+        engine_b.data_layer = self.data_layer
         
         start_date = datetime(2020, 1, 1)
         end_date = datetime(2020, 1, 2)
         
-        results_vec = engine_vec.run(
-            start_date, end_date, VectorizedStrategy(), event_driven=False)
-        results_event = engine_event.run(
-            start_date, end_date, EventStrategy(), event_driven=True)
+        results_a = engine_a.run(start_date, end_date, StrategyA())
+        results_b = engine_b.run(start_date, end_date, StrategyB())
         
-        # Both should have the same number of AAPL shares
-        pos_vec = results_vec['positions']
-        pos_event = results_event['positions']
+        # Both should have AAPL positions
+        pos_a = results_a['positions']
+        pos_b = results_b['positions']
         
-        # They may not be exactly equal due to timing differences,
-        # but should be comparable in having AAPL positions
-        assert not pos_vec.empty and not pos_event.empty
-        assert 'AAPL' in pos_vec['symbol'].values
-        assert 'AAPL' in pos_event['symbol'].values 
+        assert not pos_a.empty and not pos_b.empty
+        assert 'AAPL' in pos_a['symbol'].values
+        assert 'AAPL' in pos_b['symbol'].values 

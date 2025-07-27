@@ -49,4 +49,22 @@ class MyStrategy(Strategy):
 
 ## Available Examples
 
-- `simple_ma_strategy.py`: A simple moving average crossover strategy 
+- `simple_ma_strategy.py`: A simple moving average crossover strategy
+- `weekly_spy_trader.py`: A strategy that buys 100 shares of SPY on Monday and sells on Friday
+
+### Weekly SPY Trader Example
+
+The Weekly SPY Trader strategy demonstrates a simple calendar-based trading approach:
+
+```bash
+# Run using the provided script
+./scripts/run_weekly_spy_trader.sh
+
+# Or run directly with Python
+python weekly_spy_trader.py --start 2022-01-01 --end 2022-12-31
+```
+
+This strategy:
+1. Buys 100 shares of SPY at market price on Monday of each week
+2. Holds the position until Friday
+3. Sells all SPY shares at market price on Friday

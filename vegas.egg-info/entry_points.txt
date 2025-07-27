@@ -1,2 +1,0 @@
-[console_scripts]
-vegas = vegas.cli.main:main

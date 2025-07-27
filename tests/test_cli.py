@@ -68,7 +68,7 @@ class TestStrategy(Strategy):
         """Test the CLI help command."""
         # Run the CLI with --help
         result = subprocess.run(
-            ["python", "-m", "vegas.cli.main", "--help"],
+            [sys.executable, "-m", "vegas.cli.main", "--help"],
             capture_output=True,
             text=True
         )
@@ -84,7 +84,7 @@ class TestStrategy(Strategy):
         """Test the run help command."""
         # Run the CLI with run --help
         result = subprocess.run(
-            ["python", "-m", "vegas.cli.main", "run", "--help"],
+            [sys.executable, "-m", "vegas.cli.main", "run", "--help"],
             capture_output=True,
             text=True
         )
@@ -96,6 +96,36 @@ class TestStrategy(Strategy):
         self.assertIn("strategy_file", result.stdout)
         self.assertIn("--data-file", result.stdout)
         self.assertIn("--data-dir", result.stdout)
+
+    def test_db_status_args(self):
+        """Test that db_status handles the detailed flag correctly."""
+        # Import the function directly to test
+        from vegas.cli.main import db_status_internal
+        
+        # Create a test Namespace without the detailed flag
+        from argparse import Namespace
+        args_without_detailed = Namespace(db_dir='db', verbose=False)
+        
+        # This should not raise an AttributeError
+        try:
+            # We don't actually run the function as it requires DB setup
+            # Just check that it handles the missing attribute
+            self.assertTrue(hasattr(args_without_detailed, 'detailed') == False)
+            db_status_internal(args_without_detailed)
+            self.assertTrue(hasattr(args_without_detailed, 'detailed'))
+            self.assertEqual(args_without_detailed.detailed, False)
+        except AttributeError as e:
+            self.fail(f"db_status_internal raised AttributeError: {e}")
+        
+        # Create a test Namespace with the detailed flag
+        args_with_detailed = Namespace(db_dir='db', verbose=False, detailed=True)
+        
+        # This should use the provided value
+        try:
+            self.assertEqual(args_with_detailed.detailed, True)
+            self.assertTrue(getattr(args_with_detailed, 'detailed', False))
+        except AttributeError as e:
+            self.fail(f"Unexpected AttributeError: {e}")
 
 
 if __name__ == "__main__":

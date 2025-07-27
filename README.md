@@ -1,14 +1,16 @@
-# Vegas: Minimal Vectorized Backtesting Engine
+# Vegas: Event-Driven Backtesting Engine
 
-A lightweight Python backtesting framework for quantitative trading strategies. Vegas leverages pandas and numpy for efficient vectorized operations.
+A focused Python backtesting framework for event-driven trading strategies. Vegas provides a clean and efficient implementation for simulating market events and strategy interactions.
 
 ## Features
 
-- **Minimal design**: Small codebase, easy to understand and extend
-- **Vectorized operations**: Fast backtesting using pandas and numpy
-- **Comprehensive analytics**: Performance metrics and visualization with QuantStats
+- **Event-Driven Architecture**: Sequential processing of market events for realistic simulation
+- **Simple, Clean Design**: Focused codebase optimized for readability and extensibility
+- **Comprehensive Analytics**: Performance metrics and visualization
 - **DuckDB and Parquet**: Efficient data storage and querying
-- **CLI interface**: Easy to run backtests from the command line
+- **CLI Interface**: Easy to run backtests from the command line
+- **Timezone Support**: Configure and normalize timestamps for international markets
+- **Market Hours Handling**: Control regular vs. extended hours for accurate testing
 
 ## Installation
 
@@ -23,32 +25,44 @@ pip install .
 ## Quick Start
 
 ```python
-import pandas as pd
+from datetime import datetime
 from vegas.engine import BacktestEngine
-from vegas.strategy import Strategy
+from vegas.strategy import Strategy, Signal
 
 class MovingAverageCrossover(Strategy):
-    def __init__(self, short_window=50, long_window=200):
-        self.short_window = short_window
-        self.long_window = long_window
+    def initialize(self, context):
+        context.short_window = 20
+        context.long_window = 50
+        context.symbols = ['AAPL', 'MSFT', 'GOOG']
         
-    def generate_signals(self, data):
-        signals = pd.DataFrame(index=data.index)
-        signals['signal'] = 0.0
-        
-        # Create short and long moving averages
-        signals['short_ma'] = data['close'].rolling(window=self.short_window).mean()
-        signals['long_ma'] = data['close'].rolling(window=self.long_window).mean()
-        
-        # Generate signals
-        signals['signal'][self.long_window:] = np.where(
-            signals['short_ma'][self.long_window:] > signals['long_ma'][self.long_window:], 
-            1.0, 0.0
-        )
-        
-        # Generate positions
-        signals['position'] = signals['signal'].diff()
-        
+    def before_trading_start(self, context, data):
+        # Calculate signals before market opens
+        for symbol in context.symbols:
+            symbol_data = data[data['symbol'] == symbol]
+            if len(symbol_data) >= context.long_window:
+                prices = symbol_data.sort_values('timestamp')['close']
+                short_ma = prices[-context.short_window:].mean()
+                long_ma = prices[-context.long_window:].mean()
+                
+                if short_ma > long_ma:
+                    # Bullish signal
+                    context.signal = 'buy'
+                elif short_ma < long_ma:
+                    # Bearish signal
+                    context.signal = 'sell'
+                    
+    def handle_data(self, context, data):
+        signals = []
+        for symbol in context.symbols:
+            if hasattr(context, 'signal') and context.signal == 'buy':
+                # Generate buy signal
+                signals.append(Signal(
+                    symbol=symbol,
+                    action='buy',
+                    quantity=10,
+                    price=None  # Use market price
+                ))
+                
         return signals
 
 # Create engine
@@ -58,181 +72,109 @@ engine = BacktestEngine()
 engine.load_data("data/example.csv")
 
 # Create strategy
-strategy = MovingAverageCrossover(short_window=50, long_window=200)
+strategy = MovingAverageCrossover()
 
 # Run backtest
 results = engine.run(
-    start=pd.Timestamp("2020-01-01"),
-    end=pd.Timestamp("2021-01-01"),
+    start=datetime(2020, 1, 1),
+    end=datetime(2020, 12, 31),
     strategy=strategy,
-    initial_capital=100000
+    initial_capital=100000.0
 )
 
 # Print results
-print(results)
+print(f"Final Portfolio Value: ${results['stats']['total_return'] + 100000:.2f}")
+print(f"Total Return: {results['stats']['total_return_pct']:.2f}%")
+print(f"Total Trades: {results['stats']['num_trades']}")
 ```
 
-## Command Line Interface
+## Key Components
 
-Run backtests directly from the command line:
+### 1. Engine
+The `BacktestEngine` orchestrates the entire backtest process, managing data flow and event generation.
+
+### 2. Strategy
+Strategies respond to market events through callback methods:
+- `initialize`: Set up strategy parameters
+- `before_trading_start`: Run analysis before market opens
+- `handle_data`: Process data at each event and generate signals
+- `on_market_open`/`on_market_close`: Run special logic at market open/close
+- `on_bar`/`on_tick`: Process bar or tick data events
+- `on_trade`: Process executed trades
+- `analyze`: Analyze backtest results
+
+### 3. Portfolio
+The `Portfolio` class tracks positions, cash, and performance metrics.
+
+### 4. Data Layer
+The `DataLayer` provides efficient access to market data using DuckDB and Parquet files.
+
+## Advanced Usage
+
+Check the `examples/` directory for more detailed examples and advanced features, including:
+
+- Event-driven strategy implementations
+- Different trading approaches
+- Using the database system
+- Customizing analysis
+
+### Timezone Support
+
+Vegas provides timezone handling to normalize timestamps across different markets:
+
+```python
+# Create engine with specific timezone
+engine = BacktestEngine(timezone="US/Eastern")  
+
+# Load data - timestamps will be automatically converted
+engine.load_data("data/example.csv")
+```
+
+Using the CLI:
 
 ```bash
-# Run a backtest with data file
-vegas run examples/simple_ma_strategy.py --data-file data/example.csv --start 2020-01-01 --end 2021-01-01
+# Run backtest with New York timezone
+vegas run my_strategy.py --timezone "US/Eastern" --start 2022-01-01 --end 2022-12-31
 
-# Run a backtest using already ingested data
-vegas run examples/simple_ma_strategy.py --start 2020-01-01 --end 2021-01-01
-
-# Ingest data into the database
-vegas ingest --file data/example.csv
-
-# Ingest OHLCV files into the database
-vegas ingest-ohlcv --directory data
-
-# Check database status
-vegas db-status --detailed
-
-# Run a SQL query on the database
-vegas db-query --query "SELECT * FROM market_data LIMIT 10"
+# Ingest data with Tokyo timezone
+vegas ingest --file market_data.csv --timezone "Asia/Tokyo"
 ```
 
-## Data Management
+Supported timezones include:
+- `UTC` (default)
+- `US/Eastern` (New York)
+- `US/Pacific` (Los Angeles)
+- `Europe/London`
+- `Europe/Paris`
+- `Asia/Tokyo`
+- `Australia/Sydney`
+- And [many others](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
 
-Vegas provides two ways to work with data:
+### Market Hours Handling
 
-### 1. In-memory (pandas)
-
-Data is loaded directly into memory using pandas DataFrames. This is suitable for smaller datasets.
+Vegas lets you control how regular and extended market hours are handled:
 
 ```python
-# Load data from a file
-engine.load_data(file_path="data/example.csv")
+# Set specific market hours
+engine = BacktestEngine(timezone="US/Eastern")
+engine.set_trading_hours("NASDAQ", open="09:30", close="16:00")
 
-# Load data from multiple files in a directory
-engine.load_data(directory="data/", file_pattern="*.csv")
+# Exclude extended hours data (pre-market and after-hours)
+engine.ignore_extended_hours(True)
 ```
 
-### 2. DuckDB + Parquet (recommended for large datasets)
-
-For larger datasets, Vegas offers a database system using DuckDB and Parquet:
-
-```python
-# Data is automatically ingested into the database when loading
-engine.load_data(file_path="data/example.csv")
-
-# Explicitly ingest data using CLI
-vegas ingest --file data/example.csv
-
-# Ingest OHLCV files
-vegas ingest-ohlcv --directory data
-
-# Run backtests with database data
-vegas run examples/simple_ma_strategy.py --start 2020-01-01 --end 2021-01-01
-```
-
-Benefits of the DuckDB + Parquet approach:
-- Efficient storage (compression)
-- Fast querying
-- SQL query support
-- Reduced memory usage
-- Partitioned storage for large datasets
-
-### OHLCV Data Format
-
-The system supports OHLCV (Open, High, Low, Close, Volume) files in the format:
-- Filename pattern: `*.ohlcv-1h.csv.zst`
-- Compressed with Zstandard
-- CSV format with headers: ts_event, symbol, open, high, low, close, volume
-
-Data is automatically partitioned by year, date, and symbol in the Parquet files stored in the `db` directory.
-
-## Analytics and Reporting
-
-Vegas provides comprehensive analytics through QuantStats:
-
-```python
-# Generate a performance report
-from vegas.analytics import generate_tearsheet
-
-generate_tearsheet(results['returns'], benchmark_returns=None, title="Strategy Performance")
-```
-
-## Creating Strategies
-
-To create a strategy, subclass `Strategy`:
-
-```python
-from vegas.strategy import Strategy
-
-class MyStrategy(Strategy):
-    def __init__(self, param1=1, param2=2):
-        self.param1 = param1
-        self.param2 = param2
-        
-    def generate_signals(self, data):
-        """Generate trading signals for each symbol.
-        
-        Args:
-            data: DataFrame with market data
-            
-        Returns:
-            DataFrame with signals
-        """
-        # Your strategy logic here
-        signals = pd.DataFrame(index=data.index)
-        signals['signal'] = 0.0
-        
-        # Generate your signals...
-        
-        # Create positions
-        signals['position'] = signals['signal'].diff()
-        
-        return signals
-```
-
-## Examples
-
-See the `examples` directory for complete examples of strategies and backtests:
+Using the CLI:
 
 ```bash
-# Run an example
-./run_example.sh
+# Run with only regular market hours
+vegas run my_strategy.py --regular-hours-only
 
-# Run the database example
-./examples/database_example.sh
-
-# Run the OHLCV ingestion example
-./examples/ingest_ohlcv_example.sh
+# Customize market hours
+vegas run my_strategy.py --market NYSE --market-open 09:30 --market-close 16:00
 ```
 
-## Documentation
-
-See the `docs` directory for more detailed documentation:
-
-- [Getting Started](docs/getting_started.md)
-- [Performance Optimization](docs/performance_optimization.md)
-- [Benchmark Guide](docs/benchmark_guide.md)
-- [Database System](docs/database_system.md)
-
-## Testing
-
-Vegas comes with a comprehensive test suite covering all aspects of the backtesting engine:
-
-```bash
-# Run all tests
-cd tests && ./run_all_tests.py
-
-# Run specific test categories
-cd tests && ./run_all_tests.py --type core
-cd tests && ./run_all_tests.py --type integration
-cd tests && ./run_all_tests.py --type specialized
-
-# Generate code coverage report
-cd tests && ./run_all_tests.py --coverage
-```
-
-See `tests/README.md` for detailed information about the test suite.
+See [Market Hours Documentation](docs/market_hours.md) for more details.
 
 ## License
 
-MIT License. See LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details. 

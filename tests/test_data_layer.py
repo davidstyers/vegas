@@ -129,10 +129,10 @@ def create_corrupt_csv(file_path):
     return file_path
 
 
-def test_data_loading_single_file(temp_data_dir):
+def test_data_loading_single_file(temp_data_dir, test_data_layer):
     """Test loading data from a single file."""
-    # Initialize DataLayer
-    data_layer = DataLayer(data_dir=temp_data_dir)
+    # Use the test_data_layer fixture which is already in test mode
+    data_layer = test_data_layer
     
     # Generate test data
     df = generate_test_data(symbols=["TEST1", "TEST2"], days=2)
@@ -154,14 +154,17 @@ def test_data_loading_single_file(temp_data_dir):
     compressed_path = os.path.join(temp_data_dir, "test_data.csv.zst")
     create_compressed_file(df, compressed_path)
     
-    # Create a new data layer
-    data_layer2 = DataLayer(data_dir=temp_data_dir)
+    # Create a new data layer in test mode
+    data_layer2 = DataLayer(data_dir=temp_data_dir, test_mode=True)
     data_layer2.load_data(compressed_path)
     
     # Verify data is loaded
     assert data_layer2.data is not None
     assert not data_layer2.data.empty
     assert len(data_layer2.data) == len(df)
+    
+    # Clean up second data layer
+    data_layer2.close()
 
 
 def test_loading_multiple_files(temp_data_dir):
@@ -273,7 +276,7 @@ def test_handling_missing_or_corrupt_data(temp_data_dir):
 def test_data_retrieval_for_specific_time_ranges(temp_data_dir):
     """Test data retrieval for specific time ranges."""
     # Initialize DataLayer
-    data_layer = DataLayer(data_dir=temp_data_dir)
+    data_layer = DataLayer(data_dir=temp_data_dir, test_mode=True)
     
     # Generate test data spanning multiple days
     df = generate_test_data(symbols=["TEST1", "TEST2"], days=10)
@@ -345,7 +348,7 @@ def test_symbol_filtering_and_universe_selection(temp_data_dir):
 def test_data_aggregation_and_resampling(temp_data_dir):
     """Test data aggregation and resampling."""
     # Initialize DataLayer
-    data_layer = DataLayer(data_dir=temp_data_dir)
+    data_layer = DataLayer(data_dir=temp_data_dir, test_mode=True)
     
     # Generate test data with minute frequency
     df = generate_test_data(symbols=["TEST1"], days=2, frequency='1m')
@@ -390,7 +393,7 @@ def test_data_aggregation_and_resampling(temp_data_dir):
 def test_handling_timezone_information(temp_data_dir):
     """Test handling of timezone information."""
     # Initialize DataLayer
-    data_layer = DataLayer(data_dir=temp_data_dir)
+    data_layer = DataLayer(data_dir=temp_data_dir, test_mode=True)
     
     # Generate test data with timezone info
     df = generate_test_data(symbols=["TEST1"], days=2, include_timezone=True)
@@ -402,21 +405,28 @@ def test_handling_timezone_information(temp_data_dir):
     # Load data
     data_layer.load_data(csv_path)
     
-    # Verify data is loaded with timezone info preserved
+    # Verify data is loaded
     assert data_layer.data is not None
     assert not data_layer.data.empty
     
-    # Check if timestamps have timezone info
+    # Check timestamps - note that our database now normalizes timestamps to naive UTC
     first_ts = data_layer.data["timestamp"].iloc[0]
-    assert first_ts.tzinfo is not None
     
     # Test filtering with timezone-aware timestamps
-    start_date = df["timestamp"].min() + timedelta(hours=5)
-    filtered_data = data_layer.get_data_for_backtest(start_date, None)
+    # Since the database converts to UTC naive, we need to do the same for comparison
+    start_date_aware = df["timestamp"].min() + timedelta(hours=5)
+    
+    # Convert to naive UTC for comparison (same conversion the database does)
+    if start_date_aware.tzinfo is not None:
+        start_date = start_date_aware.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        start_date = start_date_aware
+        
+    filtered_data = data_layer.get_data_for_backtest(start_date_aware, None)
     
     # Verify filtered data
     assert not filtered_data.empty
-    assert filtered_data["timestamp"].min() >= start_date
+    assert filtered_data["timestamp"].min() >= start_date  # Compare with naive UTC
 
 
 if __name__ == "__main__":

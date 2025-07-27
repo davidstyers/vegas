@@ -65,12 +65,7 @@ def parse_date(date_str):
 
 def run_backtest(args):
     """Run a backtest with the specified arguments."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
     try:
@@ -79,20 +74,33 @@ def run_backtest(args):
         logger.info(f"Loaded strategy: {strategy_class.__name__}")
         
         # Initialize engine
-        engine = BacktestEngine()
+        engine = BacktestEngine(timezone=args.timezone)
+        
+        # Configure trading hours if provided
+        if hasattr(args, 'market') or hasattr(args, 'market_open') or hasattr(args, 'market_close'):
+            market = getattr(args, 'market', "US")
+            market_open = getattr(args, 'market_open', "09:30")
+            market_close = getattr(args, 'market_close', "16:00")
+            engine.set_trading_hours(market, market_open, market_close)
+            logger.info(f"Configured trading hours: {market_open} to {market_close} for {market} market")
+        
+        # Configure extended hours handling
+        if hasattr(args, 'regular_hours_only') and args.regular_hours_only:
+            engine.ignore_extended_hours(True)
+            logger.info("Extended hours data will be ignored")
         
         # Load data
         load_data(engine, args, logger)
         
         # Get data info
         data_info = engine.data_layer.get_data_info()
-        logger.info(f"Loaded {data_info['row_count']} data points for {data_info['symbol_count']} symbols")
+        #logger.info(f"Loaded {data_info['row_count']} data points for {data_info['symbol_count']} symbols")
         
         # Set up backtest dates
         start_date = args.start_date or data_info['start_date']
         end_date = args.end_date or data_info['end_date']
         
-        logger.info(f"Running backtest from {start_date.date()} to {end_date.date()}")
+        logger.info(f"Running backtest from {start_date.date()} to {end_date.date()} in timezone {args.timezone}")
         
         # Run backtest
         strategy = strategy_class()
@@ -187,13 +195,7 @@ def generate_quantstats_report(results, strategy_name, report_path, benchmark, l
         
         # Prepare returns series for QuantStats
         equity_curve = results['equity_curve']
-        returns = equity_curve.set_index('timestamp')['equity'].pct_change().dropna()
-        returns.index = pd.to_datetime(returns.index)
-        
-        # Check if we have enough data points for a meaningful report
-        if len(returns) < 2:
-            logger.warning("Not enough data points for a QuantStats report. Need at least 2 days of data.")
-            return
+        returns = equity_curve.set_index('timestamp')['equity']
         
         # Ensure the returns have a proper datetime index
         returns = prepare_returns_for_quantstats(returns, logger)
@@ -249,7 +251,8 @@ def prepare_returns_for_quantstats(returns, logger):
     if (returns.index.duplicated().any() or 
         returns.index.to_series().diff().min() < pd.Timedelta(days=1)):
         logger.info("Resampling intraday data to daily returns")
-        daily_returns = returns.resample('D').last().pct_change().dropna()
+        # Use last value of each day instead of calculating pct_change again
+        daily_returns = returns.resample('D').last().pct_change(fill_method=None).dropna()
         if len(daily_returns) > 1:
             return daily_returns
     
@@ -258,17 +261,12 @@ def prepare_returns_for_quantstats(returns, logger):
 
 def ingest_data(args):
     """Ingest data into the database."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
     try:
         # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir)
+        data_layer = DataLayer(data_dir=args.db_dir, timezone=args.timezone)
         
         if args.file:
             # Check if file exists
@@ -304,9 +302,11 @@ def ingest_data(args):
         # Print data info
         info = data_layer.get_data_info()
         print("\nData ingestion summary:")
-        print(f"Rows ingested: {info['row_count']}")
         print(f"Symbols: {info['symbol_count']}")
-        print(f"Date range: {info['start_date'].date()} to {info['end_date'].date()}")
+        if info['start_date'] is not None and info['end_date'] is not None:
+            start_date = info['start_date'].date() if hasattr(info['start_date'], 'date') else info['start_date']
+            end_date = info['end_date'].date() if hasattr(info['end_date'], 'date') else info['end_date']
+            print(f"Date range: {start_date} to {end_date}")
         
         return 0
         
@@ -317,17 +317,12 @@ def ingest_data(args):
 
 def ingest_ohlcv(args):
     """Ingest OHLCV data into the database."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
     try:
         # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir)
+        data_layer = DataLayer(data_dir=args.db_dir, timezone=args.timezone)
         
         if not data_layer.db_manager:
             logger.error("Database manager initialization failed")
@@ -383,12 +378,6 @@ def ingest_ohlcv(args):
 
 def db_status(args):
     """Display database status."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
     
     return db_status_internal(args)
 
@@ -396,6 +385,10 @@ def db_status(args):
 def db_status_internal(args):
     """Internal implementation of database status command."""
     logger = logging.getLogger('vegas.cli')
+    
+    # Ensure detailed attribute exists with default value
+    if not hasattr(args, 'detailed'):
+        args.detailed = False
     
     try:
         # Initialize data layer
@@ -428,7 +421,7 @@ def db_status_internal(args):
             print(f"Data sources: {len(sources)}")
             
             # Print detailed info if requested
-            if args.detailed:
+            if getattr(args, 'detailed', False):
                 if not symbols.empty:
                     print("\nTop 10 symbols by record count:")
                     top_symbols = symbols.nlargest(10, 'record_count')
@@ -454,12 +447,7 @@ def db_status_internal(args):
 
 def db_query(args):
     """Execute a SQL query on the database."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
     try:
@@ -522,12 +510,7 @@ def db_query(args):
 
 def delete_db(args):
     """Delete the database file."""
-    # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
     # Calculate the default database path
@@ -565,12 +548,6 @@ def delete_db(args):
 
 def main():
     """Main entry point for the CLI."""
-    # Set default logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
     # Create the top-level parser
     parser = argparse.ArgumentParser(description='Vegas Backtesting Engine CLI')
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
@@ -579,6 +556,7 @@ def main():
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
     common_parser.add_argument('--db-dir', type=str, default='db', help='Database directory')
+    common_parser.add_argument('--timezone', type=str, default='UTC', help='Timezone for data (e.g., UTC, US/Eastern, Europe/London)')
     
     # Run command
     run_parser = subparsers.add_parser('run', parents=[common_parser], help='Run a backtest')
@@ -593,6 +571,11 @@ def main():
     run_parser.add_argument('--results-csv', type=str, help='Save results to CSV file')
     run_parser.add_argument('--report', type=str, help='Generate QuantStats report')
     run_parser.add_argument('--benchmark', type=str, help='Benchmark symbol for report')
+    # Add new trading hours options
+    run_parser.add_argument('--market', type=str, default="US", help='Market name (e.g., NYSE, NASDAQ)')
+    run_parser.add_argument('--market-open', type=str, default="09:30", help='Market open time (HH:MM) in 24h format')
+    run_parser.add_argument('--market-close', type=str, default="16:00", help='Market close time (HH:MM) in 24h format')
+    run_parser.add_argument('--regular-hours-only', action='store_true', help='Only use data from regular market hours')
     run_parser.set_defaults(func=run_backtest)
     
     # Ingest command
@@ -632,6 +615,21 @@ def main():
     
     # Parse arguments
     args = parser.parse_args()
+    
+    # Set up centralized logging configuration
+    # This needs to happen BEFORE any modules/libraries are imported that might set up their own handlers
+    log_level = logging.DEBUG if hasattr(args, 'verbose') and args.verbose else logging.INFO
+    
+    # Remove any existing handlers from the root logger to avoid duplicate messages
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
     
     # Execute command
     if hasattr(args, 'func'):

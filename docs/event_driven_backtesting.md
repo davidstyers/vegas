@@ -2,197 +2,168 @@
 
 ## Overview
 
-Vegas provides two backtesting modes to accommodate different strategy implementation approaches:
+Vegas provides an event-driven backtesting approach that processes market data sequentially through a series of events, allowing for fine-grained control over strategy logic and execution.
 
-1. **Vectorized Mode (Default)**: Optimized for performance, processes all market data at once using efficient vector operations.
-2. **Event-Driven Mode**: Processes market data sequentially through a series of events, allowing for more fine-grained control.
-
-Event-driven backtesting is especially useful for strategies that:
+Event-driven backtesting is particularly valuable for strategies that:
 - React to specific market events (e.g., market open/close)
 - Need to maintain complex state between time periods
 - Implement pre-market analysis
-- Require more control over the execution timeline
+- Require detailed control over the execution timeline
 
-## How to Use Event-Driven Mode
+## Event System
 
-There are two ways to enable event-driven backtesting:
+The event-driven backtesting engine processes market data chronologically, generating the following event types:
 
-### 1. Automatic Detection
-
-Simply implement any of the event handler methods in your strategy:
-- `before_trading_start(context, data)`
-- `on_market_open(context, data, portfolio)`
-- `on_market_close(context, data, portfolio)`
-- `on_bar(context, data)`
-- `on_tick(context, data)`
-- `on_trade(context, trade_event, portfolio)`
-
-Vegas will automatically detect that your strategy requires event-driven execution.
-
-### 2. Explicit Flag
-
-You can also explicitly set the mode when creating your strategy:
-
-```python
-class MyStrategy(Strategy):
-    def __init__(self):
-        super().__init__()
-        self.is_event_driven = True  # Explicitly request event-driven mode
-```
-
-Or when running the backtest:
-
-```python
-engine.run(
-    start=start_date,
-    end=end_date,
-    strategy=my_strategy,
-    event_driven=True  # Explicitly request event-driven mode
-)
-```
-
-## Available Events
-
-Vegas provides several event types that you can implement in your strategies:
-
-### `before_trading_start(context, data)`
+### `before_trading_start`
 - Called before market open each trading day (9:00 AM)
 - Useful for computing signals, analyzing overnight developments, or preparing for the trading day
 - Receives data for all symbols at the current time
 
-### `on_market_open(context, data, portfolio)`
+### `on_market_open`
 - Called at market open each trading day (9:30 AM)
 - Useful for executing opening orders or processing signals from before_trading_start
 - Receives data for all symbols and current portfolio state
 
-### `on_market_close(context, data, portfolio)`
+### `on_market_close`
 - Called at market close each trading day (4:00 PM)
 - Useful for end-of-day position adjustments or reporting
 - Receives data for all symbols and current portfolio state
 
-### `on_bar(context, data)`
+### `on_bar`
 - Called when a new bar is received
 - Useful for strategies based on OHLCV bars
 - Receives data for all symbols for the current bar
 
-### `on_tick(context, data)`
+### `on_tick`
 - Called when new tick data is received (for tick-level data)
 - Useful for high-frequency strategies
 - Receives tick data for all symbols
 
-### `on_trade(context, trade_event, portfolio)`
+### `on_trade`
 - Called after a trade from this strategy is executed
 - Useful for tracking trade performance or updating state after execution
 - Receives details about the executed trade
 
-### `handle_data(context, data)`
+### `handle_data`
 - Called for all events (required for signal generation)
 - Should return a list of `Signal` objects to generate orders
-- This is the main method for order generation in event-driven mode
+- This is the main method for order generation
 
-## Signal Generation in Event-Driven Mode
+## Implementing Event-Driven Strategies
 
-Unlike vectorized mode, event-driven strategies generate signals through the `handle_data` method:
+To create an event-driven strategy, subclass the `Strategy` class and implement the relevant event handlers:
 
 ```python
-def handle_data(self, context, data):
-    signals = []
+from vegas.strategy import Strategy, Signal
+
+class MyEventDrivenStrategy(Strategy):
+    def initialize(self, context):
+        """Set up strategy parameters."""
+        context.symbols = ['AAPL', 'MSFT', 'GOOG']
+        context.short_window = 10
+        context.long_window = 30
+        context.signals = {}  # Store signals for each symbol
     
-    # Example: Buy AAPL if a condition is met
-    if should_buy_aapl(context, data):
-        aapl_price = data[data['symbol'] == 'AAPL']['close'].iloc[0]
-        signals.append(Signal(
-            symbol='AAPL',
-            action='buy',
-            quantity=10,
-            price=aapl_price
-        ))
+    def before_trading_start(self, context, data):
+        """Calculate signals before market opens."""
+        # Calculate moving averages for each symbol
+        for symbol in context.symbols:
+            # Get symbol data and calculate signals
+            symbol_data = data[data['symbol'] == symbol]
+            if len(symbol_data) >= context.long_window:
+                closes = symbol_data.sort_values('timestamp')['close']
+                short_ma = closes[-context.short_window:].mean()
+                long_ma = closes[-context.long_window:].mean()
+                
+                # Check for crossover
+                if short_ma > long_ma:
+                    context.signals[symbol] = 'buy'
+                elif short_ma < long_ma:
+                    context.signals[symbol] = 'sell'
     
-    return signals  # Return a list of Signal objects
+    def on_market_open(self, context, data, portfolio):
+        """Execute signals at market open."""
+        print(f"Market open: {data['timestamp'].iloc[0] if not data.empty else None}")
+        # Actual orders will be generated in handle_data
+    
+    def handle_data(self, context, data):
+        """Generate signals for the current event."""
+        signals = []
+        
+        # Process each symbol with a signal
+        for symbol, action in context.signals.items():
+            symbol_data = data[data['symbol'] == symbol]
+            
+            # Skip if no data available
+            if symbol_data.empty:
+                continue
+                
+            price = symbol_data['close'].iloc[0]
+            
+            if action == 'buy':
+                # Generate buy signal
+                signals.append(Signal(
+                    symbol=symbol,
+                    action='buy',
+                    quantity=10,  # Buy 10 shares
+                    price=price
+                ))
+            elif action == 'sell':
+                # Generate sell signal if we own shares
+                if portfolio and symbol in portfolio.positions:
+                    quantity = portfolio.positions[symbol]
+                    signals.append(Signal(
+                        symbol=symbol,
+                        action='sell',
+                        quantity=quantity,  # Sell all shares
+                        price=price
+                    ))
+        
+        # Clear signals after processing
+        context.signals = {}
+        
+        return signals
+```
+
+## Running an Event-Driven Backtest
+
+To run an event-driven backtest:
+
+```python
+from vegas.engine import BacktestEngine
+from datetime import datetime
+
+# Initialize engine
+engine = BacktestEngine()
+
+# Load data
+engine.load_data("data/market_data.csv")
+
+# Create strategy
+strategy = MyEventDrivenStrategy()
+
+# Run backtest
+results = engine.run(
+    start=datetime(2020, 1, 1),
+    end=datetime(2020, 12, 31),
+    strategy=strategy,
+    initial_capital=100000.0
+)
+
+# Print results
+print(f"Final Portfolio Value: ${results['equity_curve']['equity'].iloc[-1]:.2f}")
+print(f"Total Return: {results['stats']['total_return_pct']:.2f}%")
 ```
 
 ## Performance Considerations
 
-Event-driven backtesting is inherently slower than vectorized backtesting due to:
-- Sequential processing vs. parallel operations
-- More function calls and overhead
-- Fine-grained data access patterns
+For optimal performance in event-driven backtesting, Vegas uses:
 
-However, Vegas uses Cython to optimize the event loop for the best possible performance. For strategies that require event-driven functionality, the performance penalty is minimized through:
-
-1. Optimized Cython implementation of the event engine
+1. Cython implementation of the event engine when available
 2. Efficient event generation and scheduling
 3. Minimal data copying and transformation
 4. Fallback to Python when Cython is unavailable
 
 ## Example
 
-Here's a simple event-driven strategy that demonstrates several event hooks:
-
-```python
-class EventDrivenMAStrategy(Strategy):
-    def initialize(self, context):
-        context.symbols = ['AAPL', 'MSFT', 'GOOG']
-        context.short_window = 10  # Short MA window
-        context.long_window = 30   # Long MA window
-        context.signals = {}       # Store signals for each symbol
-    
-    def before_trading_start(self, context, data):
-        # Calculate moving averages for each symbol
-        for symbol in context.symbols:
-            # Get symbol data and calculate signals
-            symbol_data = data[data['symbol'] == symbol]
-            if len(symbol_data) >= context.long_window:
-                closes = symbol_data['close']
-                short_ma = closes.rolling(window=context.short_window).mean()
-                long_ma = closes.rolling(window=context.long_window).mean()
-                
-                # Check for crossover
-                if short_ma.iloc[-1] > long_ma.iloc[-1] and short_ma.iloc[-2] <= long_ma.iloc[-2]:
-                    context.signals[symbol] = 'buy'
-                elif short_ma.iloc[-1] < long_ma.iloc[-1] and short_ma.iloc[-2] >= long_ma.iloc[-2]:
-                    context.signals[symbol] = 'sell'
-    
-    def on_market_open(self, context, data, portfolio):
-        # Execute signals at market open
-        # (actual orders are returned by handle_data)
-        print(f"Market open: executing signals: {context.signals}")
-    
-    def handle_data(self, context, data):
-        signals = []
-        for symbol, signal_type in context.signals.items():
-            if symbol in data['symbol'].values:
-                price = data[data['symbol'] == symbol]['close'].iloc[0]
-                
-                if signal_type == 'buy':
-                    signals.append(Signal(symbol=symbol, action='buy', quantity=10, price=price))
-                elif signal_type == 'sell':
-                    signals.append(Signal(symbol=symbol, action='sell', quantity=10, price=price))
-        
-        return signals
-```
-
-For a complete example, see the `event_driven_example.py` file in the examples directory.
-
-## Debugging Event-Driven Strategies
-
-When debugging event-driven strategies, consider:
-
-1. Adding print statements to each event method to track execution flow
-2. Setting the logger to DEBUG level for more detailed information
-3. Creating a separate analyze method to review strategy behavior
-4. Using explicit event types to control which events are generated
-
-## Converting Between Modes
-
-If you have an existing vectorized strategy and want to convert it to event-driven:
-
-1. Implement the appropriate event methods based on your strategy's needs
-2. Move signal generation logic from `generate_signals_vectorized` to event methods and `handle_data`
-3. Return individual signals from `handle_data` instead of a signals DataFrame
-
-Similarly, to convert an event-driven strategy to vectorized:
-
-1. Move logic from event methods into `generate_signals_vectorized`
-2. Return a complete signals DataFrame with all signals for the entire backtest period
-3. Remove or simplify the event-specific methods 
+See `examples/event_driven_example.py` for a complete example of an event-driven strategy. 

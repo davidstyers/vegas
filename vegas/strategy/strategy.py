@@ -1,14 +1,12 @@
 """Strategy Layer for the Vegas backtesting engine.
 
-This module provides the base Strategy class for implementing trading strategies,
-optimized for vectorized operations rather than event-driven processing.
+This module provides the base Strategy class for implementing trading strategies
+using an event-driven approach.
 """
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime
 import pandas as pd
-import numpy as np
 
 
 @dataclass
@@ -38,7 +36,7 @@ class Context:
         """Initialize an empty context."""
         self._portfolio = None
         self.current_date = None
-        
+    
     def set_portfolio(self, portfolio):
         """Set the portfolio reference (used internally).
         
@@ -46,7 +44,7 @@ class Context:
             portfolio: Portfolio object
         """
         self._portfolio = portfolio
-        
+    
     @property
     def portfolio(self):
         """Get the current portfolio state.
@@ -83,37 +81,16 @@ class Context:
 
 
 class Strategy:
-    """Base class for implementing trading strategies.
+    """Base class for implementing event-driven trading strategies.
     
-    This class provides both vectorized and event-driven approaches to implementing 
-    trading strategies. Subclass this class and implement the required methods to define your strategy.
-    
-    For vectorized strategies, implement generate_signals_vectorized.
-    For event-driven strategies, implement the on_* methods and handle_data.
+    This class provides an event-driven approach to implementing
+    trading strategies. Subclass this class and implement the required
+    methods to define your strategy.
     """
     
     def __init__(self):
         """Initialize the strategy."""
         self.context = Context()
-        self._is_event_driven = False
-        
-    @property
-    def is_event_driven(self):
-        """Check if this strategy requires event-driven execution.
-        
-        Returns:
-            True if the strategy should run in event-driven mode, False otherwise
-        """
-        return self._is_event_driven
-    
-    @is_event_driven.setter
-    def is_event_driven(self, value):
-        """Set whether the strategy requires event-driven execution.
-        
-        Args:
-            value: True to force event-driven mode, False to use default detection
-        """
-        self._is_event_driven = value
     
     def initialize(self, context: Context) -> None:
         """Initialize the strategy with parameters.
@@ -130,7 +107,7 @@ class Strategy:
         """Process market data and generate trading signals.
         
         This method is called for each time step in the event-driven backtest.
-        Override this method to implement your strategy logic for event-driven mode.
+        Override this method to implement your strategy logic.
         
         Args:
             context: Strategy context
@@ -140,23 +117,6 @@ class Strategy:
             List of trading signals
         """
         return []
-    
-    def generate_signals_vectorized(self, context: Context, data: pd.DataFrame) -> pd.DataFrame:
-        """Process market data in a vectorized manner and generate trading signals.
-        
-        Override this method to implement your vectorized strategy logic.
-        This is called once per backtest with all data, allowing for efficient
-        vectorized calculations across the entire dataset.
-        
-        Args:
-            context: Strategy context
-            data: Full DataFrame with all market data for the backtest period
-            
-        Returns:
-            DataFrame with columns: timestamp, symbol, action, quantity, price
-        """
-        # Default implementation: return an empty DataFrame with the required columns
-        return pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
     
     def before_trading_start(self, context: Context, data: pd.DataFrame) -> None:
         """Execute pre-trading logic.
@@ -168,7 +128,6 @@ class Strategy:
             context: Strategy context
             data: Market data for the current day
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def on_market_open(self, context: Context, data: pd.DataFrame, portfolio) -> None:
@@ -182,7 +141,6 @@ class Strategy:
             data: Market data for the current time
             portfolio: Portfolio object with current positions and cash
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def on_market_close(self, context: Context, data: pd.DataFrame, portfolio) -> None:
@@ -196,7 +154,6 @@ class Strategy:
             data: Market data for the current time
             portfolio: Portfolio object with current positions and cash
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def on_bar(self, context: Context, data: pd.DataFrame) -> None:
@@ -209,7 +166,6 @@ class Strategy:
             context: Strategy context
             data: Market data for the current bar
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def on_tick(self, context: Context, data: pd.DataFrame) -> None:
@@ -222,7 +178,6 @@ class Strategy:
             context: Strategy context
             data: Market data for the current tick
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def on_trade(self, context: Context, trade_event: Dict[str, Any], portfolio) -> None:
@@ -236,7 +191,6 @@ class Strategy:
             trade_event: Dict with trade details
             portfolio: Portfolio object with current positions and cash
         """
-        # Implementing this method will automatically enable event-driven mode
         pass
     
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:

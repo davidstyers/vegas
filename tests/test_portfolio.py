@@ -469,20 +469,37 @@ def test_get_positions(sample_portfolio, sample_transactions, sample_market_data
     assert not positions.empty
     assert len(positions) == 3  # Three symbols
     assert set(positions['symbol']) == {'AAPL', 'MSFT', 'GOOG'}
-    assert set(positions.columns) == {'symbol', 'quantity', 'value'}
+    # Check for required columns (weight is a new column added in the refactoring)
+    assert set(['symbol', 'quantity', 'value']).issubset(set(positions.columns))
+    assert 'weight' in positions.columns
     
     # Verify position values
+    # Calculate total portfolio value for weight verification
+    aapl_value = 100 * 151.0
+    msft_value = 50 * 251.0
+    goog_value = 20 * 2510.0
+    total_value = aapl_value + msft_value + goog_value
+    
+    # Verify AAPL position
     aapl_row = positions[positions['symbol'] == 'AAPL'].iloc[0]
     assert aapl_row['quantity'] == 100
-    assert aapl_row['value'] == 100 * 151.0
+    assert aapl_row['value'] == aapl_value
     
+    # Verify MSFT position
     msft_row = positions[positions['symbol'] == 'MSFT'].iloc[0]
     assert msft_row['quantity'] == 50
-    assert msft_row['value'] == 50 * 251.0
+    assert msft_row['value'] == msft_value
     
+    # Verify GOOG position
     goog_row = positions[positions['symbol'] == 'GOOG'].iloc[0]
     assert goog_row['quantity'] == 20
-    assert goog_row['value'] == 20 * 2510.0
+    assert goog_row['value'] == goog_value
+    
+    # Verify weights are present and sum approximately to 1.0
+    # Note: weights are calculated based on current_equity which includes cash,
+    # not just the sum of position values
+    assert all(0 <= w <= 1 for w in positions['weight'])
+    assert sum(positions['weight']) <= 1.0
 
 
 def test_get_positions_history(sample_portfolio, sample_transactions, sample_market_data):

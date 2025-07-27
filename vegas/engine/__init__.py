@@ -1,4 +1,4 @@
-"""Backtest Engine for the Vegas backtesting engine."""
+"""Engine implementation for the Vegas backtesting engine."""
 
 from vegas.engine.engine import BacktestEngine
 

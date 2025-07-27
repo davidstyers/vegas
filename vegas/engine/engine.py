@@ -1,61 +1,94 @@
 """Backtest Engine for the Vegas backtesting engine.
 
-This module provides a minimal, vectorized backtesting engine.
+This module provides a streamlined backtesting engine.
 """
 
-from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime
-import pandas as pd
-import time
 import logging
+import time
+import pandas as pd
 
 from vegas.data import DataLayer
-from vegas.strategy import Strategy, Context
+from vegas.strategy import Strategy, Context, Signal
 from vegas.portfolio import Portfolio
-
-# Import event engine if Cython is available
-try:
-    from vegas.engine.event_engine import EventDrivenEngine, generate_events
-    CYTHON_AVAILABLE = True
-except ImportError:
-    # Fallback to Python implementations if Cython fails
-    CYTHON_AVAILABLE = False
-    from vegas.engine.event_engine_py import EventDrivenEngine, generate_events
 
 
 class BacktestEngine:
-    """Backtesting engine for the Vegas backtesting system.
+    """Efficient backtesting engine for the Vegas backtesting system.
     
-    This engine supports both vectorized and event-driven backtests.
-    Vectorized mode is used by default for performance, but event-driven
-    mode is automatically selected when a strategy implements event methods
-    or when explicitly requested.
+    This engine provides streamlined backtesting capabilities by directly
+    processing market data chronologically without a separate events system.
     """
     
-    def __init__(self, data_dir: str = "db"):
+    def __init__(self, data_dir: str = "db", timezone: str = "UTC"):
         """Initialize the backtest engine.
         
         Args:
             data_dir: Directory for storing data files
+            timezone: Timezone for data timestamps (default: 'UTC')
         """
         self._logger = logging.getLogger('vegas.engine')
-        self._logger.setLevel(logging.INFO)
+        self._logger.info(f"Initializing BacktestEngine with data directory: {data_dir}, timezone: {timezone}")
         
-        if not self._logger.handlers:
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            console_handler.setFormatter(formatter)
-            self._logger.addHandler(console_handler)
-            
-        self._logger.info(f"Initializing BacktestEngine with data directory: {data_dir}")
-        
-        self.data_layer = DataLayer(data_dir)
+        self.data_layer = DataLayer(data_dir, timezone=timezone)
         self.strategy = None
         self.portfolio = None
+        self.timezone = timezone
+        
+        # Trading hours configuration
+        self._market_open_time = "09:30"  # Default market open (US)
+        self._market_close_time = "16:00"  # Default market close (US)
+        self._market_name = "US"  # Default market name
+        self._ignore_extended_hours = False  # By default, use all data
     
-    def load_data(self, file_path: str = None, directory: str = None, 
-                 file_pattern: str = None, max_files: int = None) -> None:
+    def set_trading_hours(self, market_name="US", open_time="09:30", close_time="16:00"):
+        """Set the regular trading hours for the backtest.
+        
+        Args:
+            market_name: Market name (e.g., 'NASDAQ', 'NYSE', 'LSE')
+            open_time: Market open time in 24-hour format (HH:MM)
+            close_time: Market close time in 24-hour format (HH:MM)
+        """
+        self._market_name = market_name
+        self._market_open_time = open_time
+        self._market_close_time = close_time
+        self._logger.info(f"Set trading hours for {market_name}: {open_time} to {close_time}")
+        
+    def ignore_extended_hours(self, ignore=True):
+        """Configure whether to ignore extended hours data.
+        
+        Args:
+            ignore: If True, only use data within regular market hours
+        """
+        self._ignore_extended_hours = ignore
+        status = "ignored" if ignore else "included"
+        self._logger.info(f"Extended hours data will be {status}")
+        
+    def _is_regular_market_hours(self, timestamp):
+        """Check if a timestamp falls within regular market hours.
+        
+        Args:
+            timestamp: The timestamp to check
+            
+        Returns:
+            True if timestamp is within regular market hours, False otherwise
+        """
+        # Convert timestamp to datetime with time component
+        dt = pd.Timestamp(timestamp)
+        
+        # Parse market hours
+        open_hour, open_minute = map(int, self._market_open_time.split(':'))
+        close_hour, close_minute = map(int, self._market_close_time.split(':'))
+        
+        # Convert to comparable values (minutes since midnight)
+        ts_minutes = dt.hour * 60 + dt.minute
+        open_minutes = open_hour * 60 + open_minute
+        close_minutes = close_hour * 60 + close_minute
+        
+        # Check if timestamp is within market hours
+        return open_minutes <= ts_minutes < close_minutes
+    
+    def load_data(self, file_path=None, directory=None, file_pattern=None, max_files=None):
         """Load market data for backtesting.
         
         Args:
@@ -82,12 +115,13 @@ class BacktestEngine:
             
         # Log information about the loaded data
         data_info = self.data_layer.get_data_info()
-        self._logger.info(f"Available data: {data_info['row_count']} rows, "
-                        f"{data_info['symbol_count']} symbols, "
-                        f"from {data_info['start_date']} to {data_info['end_date']}")
+        self._logger.info(
+            f"Available data: {data_info['row_count']} rows, "
+            f"{data_info['symbol_count']} symbols, "
+            f"from {data_info['start_date']} to {data_info['end_date']}"
+        )
     
-    def run(self, start: datetime, end: datetime, strategy: Strategy,
-           initial_capital: float = 100000.0, event_driven: bool = None) -> Dict[str, Any]:
+    def run(self, start, end, strategy, initial_capital=100000.0):
         """Run a backtest.
         
         Args:
@@ -95,8 +129,6 @@ class BacktestEngine:
             end: End date for the backtest
             strategy: Strategy to run
             initial_capital: Initial capital
-            event_driven: Override to force event-driven mode (True) or vectorized mode (False)
-                          If None, the engine will detect the appropriate mode based on the strategy
             
         Returns:
             Dictionary with backtest results
@@ -122,33 +154,9 @@ class BacktestEngine:
             self._logger.warning("No data available for the specified period")
             return self._create_empty_results()
         
-        # Determine whether to use event-driven or vectorized mode
-        should_use_event_driven = self._requires_event_driven(strategy)
-        
-        # Override if explicitly specified
-        if event_driven is not None:
-            should_use_event_driven = event_driven
-            if event_driven:
-                self._logger.info("Event-driven mode explicitly requested")
-            else:
-                self._logger.info("Vectorized mode explicitly requested")
-                
-        # Execute the appropriate backtest type
-        if should_use_event_driven:
-            self._logger.info("Executing event-driven backtest")
-            results_dict = self._run_event_driven_backtest(start, end, context)
-        else:
-            self._logger.info("Executing vectorized backtest")
-            self._run_vectorized_backtest(market_data, context)
-            
-            # Create results dictionary for vectorized mode
-            results_dict = {
-                'stats': self.portfolio.get_stats(),
-                'equity_curve': self.portfolio.get_equity_curve(),
-                'transactions': self.portfolio.get_transactions(),
-                'positions': self.portfolio.get_positions(),
-                'success': True
-            }
+        # Run the backtest
+        self._logger.info("Executing backtest")
+        results_dict = self._run_backtest(market_data, context)
         
         # Calculate execution time
         execution_time = time.time() - start_time
@@ -162,153 +170,134 @@ class BacktestEngine:
         
         return results_dict
     
-    def _requires_event_driven(self, strategy: Strategy) -> bool:
-        """Check if a strategy requires event-driven execution.
-        
-        A strategy requires event-driven execution if:
-        1. It has explicitly set is_event_driven = True
-        2. It implements any of the event-driven methods with custom logic
-        
-        Args:
-            strategy: Strategy to check
-            
-        Returns:
-            True if the strategy should use event-driven mode
-        """
-        # Check explicit flag first
-        if hasattr(strategy, 'is_event_driven') and strategy.is_event_driven:
-            return True
-            
-        # Check if any event methods are implemented (not using default implementation)
-        event_methods = [
-            'before_trading_start',
-            'on_market_open',
-            'on_market_close',
-            'on_bar',
-            'on_tick',
-            'on_trade'
-        ]
-        
-        strategy_class = strategy.__class__
-        base_class = Strategy
-        
-        for method_name in event_methods:
-            # Check if the method is overridden
-            if hasattr(strategy_class, method_name):
-                strategy_method = getattr(strategy_class, method_name)
-                base_method = getattr(base_class, method_name)
-                
-                # If the method implementation is different from the base class
-                if strategy_method.__code__ is not base_method.__code__:
-                    return True
-                    
-        return False
-    
-    def _run_vectorized_backtest(self, market_data: pd.DataFrame, context: Context) -> None:
-        """Run the vectorized backtest algorithm.
+    def _run_backtest(self, market_data, context):
+        """Run the backtest algorithm.
         
         Args:
             market_data: DataFrame with market data for the backtest period
-            context: Strategy context
-        """
-        # Generate signals using the vectorized strategy method
-        self._logger.info("Generating trading signals")
-        
-        try:
-            signals_df = self.strategy.generate_signals_vectorized(context, market_data)
-        except Exception as e:
-            self._logger.error(f"Error generating signals: {e}")
-            signals_df = pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
-        
-        if signals_df.empty:
-            self._logger.warning("No signals generated by the strategy")
-            return
-        
-        # Process data timestamp by timestamp
-        self._logger.info("Executing signals and updating portfolio")
-        
-        # Sort data by timestamp for sequential processing
-        market_data = market_data.sort_values('timestamp')
-        signals_df = signals_df.sort_values('timestamp')
-        
-        # Get unique timestamps
-        timestamps = market_data['timestamp'].unique()
-        
-        # Process each timestamp
-        for timestamp in timestamps:
-            current_data = market_data[market_data['timestamp'] == timestamp]
-            current_signals = signals_df[signals_df['timestamp'] == timestamp]
-            
-            # Execute signals and create transactions
-            transactions = pd.DataFrame()
-            if not current_signals.empty:
-                transactions = self._create_transactions_from_signals(current_signals, current_data)
-                
-            # Update portfolio with transactions (or empty DataFrame if no transactions)
-            self.portfolio.update_from_transactions(timestamp, transactions, current_data)
-    
-    def _run_event_driven_backtest(self, start: datetime, end: datetime, context: Context) -> Dict[str, Any]:
-        """Run the event-driven backtest algorithm.
-        
-        Args:
-            start: Start date for the backtest
-            end: End date for the backtest
             context: Strategy context
             
         Returns:
             Dictionary with backtest results
         """
-        # Generate events for the backtest period
-        self._logger.info("Generating events for event-driven backtest")
-        events_df = generate_events(start, end, self.data_layer, debug=False)
-        
-        if events_df.empty:
-            self._logger.warning("No events generated for the backtest period")
+        try:
+            # Make sure we're working with a copy of the DataFrame to avoid SettingWithCopyWarning
+            market_data = market_data.copy()
+            
+            # Filter data to only include regular market hours if needed
+            if self._ignore_extended_hours and not market_data.empty:
+                original_count = len(market_data)
+                market_data = market_data[market_data['timestamp'].apply(self._is_regular_market_hours)]
+                filtered_count = len(market_data)
+                if filtered_count < original_count:
+                    self._logger.info(
+                        f"Filtered out {original_count - filtered_count} data points outside regular "
+                        f"market hours ({self._market_open_time} to {self._market_close_time})"
+                    )
+                    if filtered_count == 0:
+                        self._logger.warning("No data points remaining after filtering for market hours!")
+                        return self._create_empty_results()
+            
+            # Group market data by trading day for daily processing
+            market_data['date'] = pd.to_datetime(market_data['timestamp']).dt.date
+            unique_dates = market_data['date'].unique()
+            self._logger.info(f"Processing {len(unique_dates)} trading days")
+            
+            # Process data day by day
+            for date in unique_dates:
+                daily_data = market_data[market_data['date'] == date]
+                
+                # Call before_trading_start at the beginning of each day
+                if hasattr(self.strategy, 'before_trading_start'):
+                    # Find data for market open - use first data point within regular hours if filtering
+                    if self._ignore_extended_hours:
+                        # Use the first data point of regular trading hours
+                        regular_hours_data = daily_data[daily_data['timestamp'].apply(self._is_regular_market_hours)]
+                        if not regular_hours_data.empty:
+                            day_start_data = regular_hours_data.sort_values('timestamp').iloc[0:1]
+                        else:
+                            # Fallback to first data point of the day if no regular hours data
+                            day_start_data = daily_data.sort_values('timestamp').iloc[0:1]
+                    else:
+                        # Use first data point of the day (could be extended hours)
+                        day_start_data = daily_data.sort_values('timestamp').iloc[0:1]
+                        
+                    self.strategy.before_trading_start(context, day_start_data)
+                
+                # Process each timestamp chronologically
+                for timestamp, timestamp_data in daily_data.groupby('timestamp'):
+                    # Update context with current timestamp
+                    context.current_date = pd.Timestamp(timestamp).date()
+                    
+                    # Call handle_data for each timestamp to generate trading signals
+                    if hasattr(self.strategy, 'handle_data'):
+                        signals = self.strategy.handle_data(context, timestamp_data)
+                        
+                        if signals:
+                            # Process signals and create transactions
+                            transactions = self._create_transactions_from_signals(signals, timestamp_data)
+                            
+                            # Update portfolio with transactions
+                            if len(transactions) > 0:
+                                self.portfolio.update_from_transactions(
+                                    timestamp, 
+                                    transactions,
+                                    timestamp_data
+                                )
+                    
+                    # Update portfolio state for this timestamp even without transactions
+                    self.portfolio.update_from_transactions(timestamp, pd.DataFrame(), timestamp_data)
+                    
+                    # Call on_market_close at the end of the trading day
+                    # Assuming last timestamp of the day is market close
+                    is_last_timestamp = timestamp == daily_data['timestamp'].max()
+                    if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
+                        self.strategy.on_market_close(context, timestamp_data, self.portfolio)
+            
+            # Prepare results
+            return {
+                'stats': self.portfolio.get_stats(),
+                'equity_curve': self.portfolio.get_equity_curve(),
+                'transactions': self.portfolio.get_transactions(),
+                'positions': self.portfolio.get_positions(),
+                'success': True
+            }
+            
+        except Exception as e:
+            self._logger.error(f"Error during backtest execution: {e}")
             return self._create_empty_results()
-            
-        # Create event-driven engine
-        if CYTHON_AVAILABLE:
-            self._logger.info("Using Cython-optimized event engine")
-        else:
-            self._logger.warning("Cython event engine not available, using Python fallback")
-            
-        event_engine = EventDrivenEngine(
-            self.strategy, 
-            self.portfolio, 
-            self.data_layer, 
-            self._logger
-        )
-        
-        # Run the event-driven backtest
-        return event_engine.run_event_driven_backtest(events_df)
     
-    def _create_transactions_from_signals(self, signals: pd.DataFrame, 
-                                         market_data: pd.DataFrame) -> pd.DataFrame:
+    def _create_transactions_from_signals(self, signals, market_data):
         """Convert signals to transactions.
         
         Args:
-            signals: DataFrame with signals
+            signals: List of Signal objects
             market_data: DataFrame with current market data
             
         Returns:
             DataFrame with transactions
         """
+        if not signals:
+            return pd.DataFrame()
+            
         transactions = []
         
         # Create a lookup for current prices
-        price_lookup = market_data.set_index('symbol')['close'].to_dict()
+        price_lookup = {}
+        if not market_data.empty and 'symbol' in market_data.columns and 'close' in market_data.columns:
+            price_lookup = market_data.set_index('symbol')['close'].to_dict()
         
-        for _, signal in signals.iterrows():
-            symbol = signal['symbol']
-            action = signal['action']
-            quantity = signal['quantity']
+        for signal in signals:
+            symbol = signal.symbol
+            action = signal.action
+            quantity = signal.quantity
             
             # Skip if symbol not in current market data
             if symbol not in price_lookup:
                 continue
                 
             # Get execution price
-            price = signal.get('price') or price_lookup[symbol]
+            price = signal.price if signal.price is not None else price_lookup[symbol]
             
             # Convert action to quantity (positive for buy, negative for sell)
             if action.lower() == 'sell':
@@ -326,7 +315,7 @@ class BacktestEngine:
         
         return pd.DataFrame(transactions) if transactions else pd.DataFrame()
     
-    def _create_empty_results(self) -> Dict[str, Any]:
+    def _create_empty_results(self):
         """Create empty results dictionary for when no data is available."""
         return {
             'stats': {

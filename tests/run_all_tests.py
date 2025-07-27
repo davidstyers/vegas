@@ -18,6 +18,9 @@ def run_tests(test_type=None, verbose=False, coverage=False):
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
+    # Set environment variable to ensure test mode is used
+    os.environ['VEGAS_TEST_MODE'] = '1'
+    
     # Build pytest arguments
     pytest_args = []
     
@@ -84,6 +87,9 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
+    
+    # Set environment variable to ensure test mode is used
+    os.environ['VEGAS_TEST_MODE'] = '1'
     
     if args.file:
         # Run a specific test file

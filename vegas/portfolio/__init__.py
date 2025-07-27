@@ -1,4 +1,4 @@
-"""Portfolio Layer for the Vegas backtesting engine."""
+"""Portfolio implementation for the Vegas backtesting engine."""
 
 from vegas.portfolio.portfolio import Portfolio
 

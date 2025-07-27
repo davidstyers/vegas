@@ -1,16 +1,16 @@
 """Portfolio layer for the Vegas backtesting engine.
 
-This module provides a minimal portfolio tracking system optimized for vectorized backtesting.
+This module provides a portfolio tracking system for event-driven backtesting.
 """
 
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, Any
 from datetime import datetime
+import logging
 import pandas as pd
-import numpy as np
 
 
 class Portfolio:
-    """Minimal vectorized portfolio tracking for the Vegas backtesting engine."""
+    """Portfolio tracking system for the Vegas event-driven backtesting engine."""
     
     def __init__(self, initial_capital: float = 100000.0):
         """Initialize the portfolio.
@@ -29,7 +29,10 @@ class Portfolio:
         self.position_history = []  # List of {timestamp, symbol, quantity, value}
         self.transaction_history = []  # List of {timestamp, symbol, quantity, price, commission}
         
-    def update_from_transactions(self, timestamp: datetime, transactions: pd.DataFrame, market_data: pd.DataFrame) -> None:
+        # Setup logging
+        self._logger = logging.getLogger('vegas.portfolio')
+    
+    def update_from_transactions(self, timestamp, transactions, market_data):
         """Update portfolio based on executed transactions and current market data.
         
         Args:
@@ -44,6 +47,46 @@ class Portfolio:
                 quantity = txn['quantity']
                 price = txn['price']
                 commission = txn.get('commission', 0.0)
+                self._logger.info(f"{timestamp}: {quantity} of {symbol} at {price}")
+                
+                # For sell transactions, validate we have enough shares
+                if quantity < 0:
+                    current_position = self.positions.get(symbol, 0)
+                    if abs(quantity) > current_position:
+                        original_quantity = quantity
+                        # Cannot sell more than we own (prevent short selling)
+                        quantity = -current_position
+                        if abs(quantity) < 1e-6:
+                            self._logger.warning(
+                                f"Skipping sell of {abs(original_quantity)} shares of {symbol} - "
+                                f"insufficient position (current: {current_position})"
+                            )
+                            continue  # Skip if adjusted quantity is effectively zero
+                        self._logger.warning(
+                            f"Adjusted sell from {abs(original_quantity)} to {abs(quantity)} shares of "
+                            f"{symbol} due to insufficient position"
+                        )
+                
+                # For buy transactions, validate we have enough cash
+                if quantity > 0:
+                    cost = quantity * price + commission
+                    if cost > self.current_cash:
+                        original_quantity = quantity
+                        # Scale back to what we can afford
+                        max_quantity = max(0, (self.current_cash - commission) / price)
+                        quantity = max_quantity
+                        if quantity < 1e-6:
+                            self._logger.warning(
+                                f"Skipping buy of {original_quantity} shares of {symbol} - "
+                                f"insufficient cash (needed: ${cost:.2f}, available: ${self.current_cash:.2f})"
+                            )
+                            continue  # Skip if adjusted quantity is effectively zero
+                        # Recalculate commission with new quantity
+                        commission = txn.get('commission', 0.0) * (quantity / txn['quantity'])
+                        self._logger.warning(
+                            f"Adjusted buy from {original_quantity} to {quantity} shares of "
+                            f"{symbol} due to insufficient cash"
+                        )
                 
                 # Update cash
                 self.current_cash -= (quantity * price + commission)
@@ -99,121 +142,131 @@ class Portfolio:
             'cash': self.current_cash
         })
     
-    def get_portfolio_value(self) -> float:
-        """Get current portfolio value.
+    def get_portfolio_value(self):
+        """Get the current portfolio value.
         
         Returns:
             Total portfolio value (cash + positions)
         """
-        position_value = sum(self.position_values.values())
-        return self.current_cash + position_value
+        return self.current_equity
     
-    def get_equity_curve(self) -> pd.DataFrame:
-        """Get portfolio equity curve as a DataFrame.
+    def get_equity_curve(self):
+        """Get the portfolio equity curve.
         
         Returns:
-            DataFrame with timestamp and equity values
+            DataFrame with columns: timestamp, equity, cash
         """
         if not self.equity_history:
             return pd.DataFrame(columns=['timestamp', 'equity', 'cash'])
-            
         return pd.DataFrame(self.equity_history)
     
-    def get_returns(self) -> pd.DataFrame:
-        """Get portfolio returns as a DataFrame.
+    def get_returns(self):
+        """Get portfolio returns.
         
         Returns:
-            DataFrame with timestamp and return values
+            DataFrame with portfolio returns
         """
-        if not self.equity_history or len(self.equity_history) < 2:
-            return pd.DataFrame(columns=['timestamp', 'return'])
-            
-        equity_df = pd.DataFrame(self.equity_history)
-        equity_df['return'] = equity_df['equity'].pct_change()
+        equity_curve = self.get_equity_curve()
+        if len(equity_curve) <= 1:
+            return pd.DataFrame(columns=['timestamp', 'return', 'cumulative_return'])
         
-        # Fill the first NaN return with 0
-        equity_df['return'] = equity_df['return'].fillna(0)
+        # Calculate returns with explicit fill_method parameter to avoid deprecation warning
+        equity_curve['return'] = equity_curve['equity'].pct_change(fill_method=None).fillna(0)
+        equity_curve['cumulative_return'] = (1 + equity_curve['return']).cumprod() - 1
         
-        return equity_df[['timestamp', 'return']]
+        return equity_curve[['timestamp', 'return', 'cumulative_return']]
     
-    def get_transactions(self) -> pd.DataFrame:
-        """Get transaction history as a DataFrame.
+    def get_transactions(self):
+        """Get all transactions.
         
         Returns:
-            DataFrame with transaction details
+            DataFrame with transaction history
         """
         if not self.transaction_history:
             return pd.DataFrame(columns=['timestamp', 'symbol', 'quantity', 'price', 'commission'])
-            
         return pd.DataFrame(self.transaction_history)
     
-    def get_positions(self) -> pd.DataFrame:
-        """Get current positions as a DataFrame.
+    def get_positions(self):
+        """Get current portfolio positions.
         
         Returns:
-            DataFrame with position details
+            DataFrame with current positions
         """
-        positions = []
+        positions_data = []
         for symbol, quantity in self.positions.items():
             value = self.position_values.get(symbol, 0.0)
-            positions.append({
+            positions_data.append({
                 'symbol': symbol,
                 'quantity': quantity,
-                'value': value
+                'value': value,
+                'weight': value / self.current_equity if self.current_equity > 0 else 0.0
             })
-        
-        if not positions:
-            return pd.DataFrame(columns=['symbol', 'quantity', 'value'])
             
-        return pd.DataFrame(positions)
+        if not positions_data:
+            return pd.DataFrame(columns=['symbol', 'quantity', 'value', 'weight'])
+        return pd.DataFrame(positions_data)
     
-    def get_positions_history(self) -> Dict[datetime, Dict[str, Dict[str, float]]]:
-        """Get historical positions data.
+    def get_positions_history(self):
+        """Get the history of portfolio positions.
         
         Returns:
-            Dictionary with timestamp -> symbol -> position details
+            Dict with timestamp-keyed position snapshots
         """
-        positions_by_time = {}
+        position_history = {}
         
-        for pos in self.position_history:
-            timestamp = pos['timestamp']
-            symbol = pos['symbol']
-            
-            if timestamp not in positions_by_time:
-                positions_by_time[timestamp] = {}
+        # Group position history by timestamp
+        df = pd.DataFrame(self.position_history)
+        if not df.empty:
+            # Convert to dictionary format: timestamp -> {symbol -> {quantity, value}}
+            for timestamp, group in df.groupby('timestamp'):
+                symbol_dict = {}
+                for _, row in group.iterrows():
+                    symbol_dict[row['symbol']] = {
+                        'quantity': row['quantity'],
+                        'value': row['value']
+                    }
+                position_history[timestamp] = symbol_dict
                 
-            positions_by_time[timestamp][symbol] = {
-                'quantity': pos['quantity'],
-                'value': pos['value']
-            }
-            
-        return positions_by_time
+        return position_history
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Calculate basic performance statistics.
+    def get_stats(self):
+        """Calculate performance statistics.
         
         Returns:
-            Dictionary containing performance metrics
+            Dictionary with calculated statistics
         """
-        if not self.equity_history:
-            return {
-                'total_return': 0.0,
-                'total_return_pct': 0.0,
-                'num_trades': 0
-            }
+        stats = {}
         
-        # Calculate metrics
-        initial_equity = self.initial_capital
-        final_equity = self.current_equity
+        # Basic portfolio stats
+        stats['initial_capital'] = self.initial_capital
+        stats['final_value'] = self.current_equity
+        stats['cash'] = self.current_cash
+        stats['total_return'] = self.current_equity - self.initial_capital
+        stats['total_return_pct'] = (self.current_equity / self.initial_capital - 1) * 100
         
-        total_return = final_equity - initial_equity
-        total_return_pct = (total_return / initial_equity) if initial_equity > 0 else 0.0
+        # Transaction stats
+        transactions_df = self.get_transactions()
+        stats['num_trades'] = len(transactions_df)
         
-        # Count trades
-        num_trades = len(self.transaction_history)
+        # Get equity curve for more sophisticated stats
+        equity_df = self.get_equity_curve()
+        returns_df = self.get_returns()
         
-        return {
-            'total_return': total_return,
-            'total_return_pct': total_return_pct * 100.0,  # Convert to percentage
-            'num_trades': num_trades
-        } 
+        if len(equity_df) > 1:
+            # Calculate drawdown
+            equity_df['previous_peak'] = equity_df['equity'].cummax()
+            equity_df['drawdown'] = (equity_df['equity'] - equity_df['previous_peak']) / equity_df['previous_peak'] * 100
+            stats['max_drawdown'] = abs(equity_df['drawdown'].min())
+            stats['max_drawdown_pct'] = abs(equity_df['drawdown'].min())
+            
+            # Calculate Sharpe ratio (assuming daily data and risk-free rate of 0)
+            if len(returns_df) > 1:
+                daily_returns = returns_df['return'].values
+                if len(daily_returns) > 0 and daily_returns.std() > 0:
+                    stats['sharpe_ratio'] = (daily_returns.mean() / daily_returns.std()) * (252 ** 0.5)
+                    stats['annual_return_pct'] = ((1 + daily_returns.mean()) ** 252 - 1) * 100
+                else:
+                    stats['sharpe_ratio'] = 0.0
+                    stats['annual_return_pct'] = 0.0
+        
+        return stats 
