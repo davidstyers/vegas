@@ -9,6 +9,27 @@ import logging
 import pandas as pd
 
 
+class Position:
+    """A class representing a portfolio position."""
+    
+    def __init__(self, symbol, quantity, value=0.0):
+        """Initialize a position.
+        
+        Args:
+            symbol: Symbol of the security
+            quantity: Number of shares/units
+            value: Current market value
+        """
+        self.symbol = symbol
+        self.quantity = quantity
+        self.value = value
+        
+    def __str__(self):
+        return f"Position({self.symbol}, {self.quantity}, ${self.value:.2f})"
+    
+    def __repr__(self):
+        return self.__str__()
+
 class Portfolio:
     """Portfolio tracking system for the Vegas event-driven backtesting engine."""
     
@@ -187,7 +208,21 @@ class Portfolio:
         return pd.DataFrame(self.transaction_history)
     
     def get_positions(self):
-        """Get current portfolio positions.
+        """Get current portfolio positions as Position objects.
+        
+        Returns:
+            List of Position objects
+        """
+        positions_list = []
+        for symbol, quantity in self.positions.items():
+            if abs(quantity) > 1e-6:  # Only include non-zero positions
+                value = self.position_values.get(symbol, 0.0)
+                positions_list.append(Position(symbol, quantity, value))
+        
+        return positions_list
+    
+    def get_positions_dataframe(self):
+        """Get current portfolio positions as a DataFrame.
         
         Returns:
             DataFrame with current positions

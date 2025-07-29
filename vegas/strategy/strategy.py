@@ -35,6 +35,7 @@ class Context:
     def __init__(self):
         """Initialize an empty context."""
         self._portfolio = None
+        self._engine = None  # Reference to the BacktestEngine
         self.current_date = None
     
     def set_portfolio(self, portfolio):
@@ -44,6 +45,14 @@ class Context:
             portfolio: Portfolio object
         """
         self._portfolio = portfolio
+        
+    def set_engine(self, engine):
+        """Set the backtest engine reference (used internally).
+        
+        Args:
+            engine: BacktestEngine object
+        """
+        self._engine = engine
     
     @property
     def portfolio(self):

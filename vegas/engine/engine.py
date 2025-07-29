@@ -11,6 +11,7 @@ import pandas as pd
 from vegas.data import DataLayer
 from vegas.strategy import Strategy, Context, Signal
 from vegas.portfolio import Portfolio
+from vegas.pipeline.engine import PipelineEngine
 
 
 class BacktestEngine:
@@ -40,6 +41,11 @@ class BacktestEngine:
         self._market_close_time = "16:00"  # Default market close (US)
         self._market_name = "US"  # Default market name
         self._ignore_extended_hours = False  # By default, use all data
+        
+        # Add pipeline engine
+        self.pipeline_engine = PipelineEngine(self.data_layer)
+        self.attached_pipelines = {}
+        self._pipeline_results = {}
     
     def set_trading_hours(self, market_name="US", open_time="09:30", close_time="16:00"):
         """Set the regular trading hours for the backtest.
@@ -63,6 +69,35 @@ class BacktestEngine:
         self._ignore_extended_hours = ignore
         status = "ignored" if ignore else "included"
         self._logger.info(f"Extended hours data will be {status}")
+    
+    def attach_pipeline(self, pipeline, name):
+        """Register a pipeline to be computed at the start of each day.
+        
+        Args:
+            pipeline: The pipeline to compute
+            name: The name of the pipeline
+            
+        Returns:
+            The pipeline that was attached
+        """
+        self._logger.info(f"Attaching pipeline '{name}'")
+        self.attached_pipelines[name] = pipeline
+        return pipeline
+    
+    def pipeline_output(self, name):
+        """Get the results of the pipeline with the given name for the current day.
+        
+        Args:
+            name: Name of the pipeline
+            
+        Returns:
+            DataFrame containing the results of the requested pipeline for the current date
+        """
+        if name not in self._pipeline_results:
+            self._logger.warning(f"No pipeline named '{name}' has been attached or computed")
+            # Return empty DataFrame instead of raising an error
+            return pd.DataFrame()
+        return self._pipeline_results[name]
         
     def _is_regular_market_hours(self, timestamp):
         """Check if a timestamp falls within regular market hours.
@@ -100,14 +135,10 @@ class BacktestEngine:
         # Handle loading data based on provided parameters
         if file_path:
             self._logger.info(f"Loading data from single file: {file_path}")
-            self.data_layer.load_data(file_path)
-        elif directory or file_pattern:
-            self._logger.info(f"Loading data from multiple files")
-            self.data_layer.load_multiple_files(
-                directory=directory,
-                file_pattern=file_pattern,
-                max_files=max_files
-            )
+            self.data_layer.load_data(file_path=file_path)
+        elif directory:
+            self._logger.info(f"Loading data from directory: {directory}")
+            self.data_layer.load_data(directory=directory, file_pattern=file_pattern, max_files=max_files)
         elif not self.data_layer.is_initialized():
             raise ValueError("No data source specified and no data is currently loaded.")
         else:
@@ -116,9 +147,9 @@ class BacktestEngine:
         # Log information about the loaded data
         data_info = self.data_layer.get_data_info()
         self._logger.info(
-            f"Available data: {data_info['row_count']} rows, "
-            f"{data_info['symbol_count']} symbols, "
-            f"from {data_info['start_date']} to {data_info['end_date']}"
+            f"Available data: {data_info.get('row_count', 'unknown')} rows, "
+            f"{data_info.get('symbol_count', 0)} symbols, "
+            f"from {data_info.get('start_date', 'unknown')} to {data_info.get('end_date', 'unknown')}"
         )
     
     def run(self, start, end, strategy, initial_capital=100000.0):
@@ -142,6 +173,7 @@ class BacktestEngine:
         # Get context and initialize strategy
         context = self.strategy.context
         context.set_portfolio(self.portfolio)  # Ensure portfolio is accessible
+        context.set_engine(self)  # Set reference to the engine for pipeline access
         self.strategy.initialize(context)
         
         start_time = time.time()
@@ -205,7 +237,32 @@ class BacktestEngine:
             
             # Process data day by day
             for date in unique_dates:
+                # Clear previous pipeline results
+                self._pipeline_results = {}
+                
+                # Get data for the current day
                 daily_data = market_data[market_data['date'] == date]
+                day_timestamp = pd.Timestamp(date)
+                
+                # Compute any attached pipelines for this day
+                for name, pipeline in self.attached_pipelines.items():
+                    try:
+                        # Run pipeline for just this date
+                        pipeline_result = self.pipeline_engine.run_pipeline(
+                            pipeline, 
+                            start_date=day_timestamp,
+                            end_date=day_timestamp
+                        )
+                        if not pipeline_result.empty:
+                            # Make results available via pipeline_output
+                            self._pipeline_results[name] = pipeline_result
+                            self._logger.debug(
+                                f"Pipeline '{name}' computed {len(pipeline_result)} results for {date}"
+                            )
+                        else:
+                            self._logger.warning(f"Pipeline '{name}' returned empty results for {date}")
+                    except Exception as e:
+                        self._logger.error(f"Error computing pipeline '{name}' for {date}: {e}")
                 
                 # Call before_trading_start at the beginning of each day
                 if hasattr(self.strategy, 'before_trading_start'):
@@ -288,30 +345,39 @@ class BacktestEngine:
             price_lookup = market_data.set_index('symbol')['close'].to_dict()
         
         for signal in signals:
-            symbol = signal.symbol
-            action = signal.action
-            quantity = signal.quantity
-            
-            # Skip if symbol not in current market data
-            if symbol not in price_lookup:
-                continue
+            try:
+                # Check if signal is valid
+                if not hasattr(signal, 'symbol') or not hasattr(signal, 'action') or not hasattr(signal, 'quantity'):
+                    self._logger.warning(f"Invalid signal: {signal}")
+                    continue
                 
-            # Get execution price
-            price = signal.price if signal.price is not None else price_lookup[symbol]
-            
-            # Convert action to quantity (positive for buy, negative for sell)
-            if action.lower() == 'sell':
-                quantity = -abs(quantity)
+                symbol = signal.symbol
+                action = signal.action
+                quantity = signal.quantity
                 
-            # Add a simplified commission
-            commission = abs(quantity * price * 0.001)  # 0.1% commission
-            
-            transactions.append({
-                'symbol': symbol,
-                'quantity': quantity,
-                'price': price,
-                'commission': commission
-            })
+                # Skip if symbol not in current market data
+                if symbol not in price_lookup:
+                    self._logger.warning(f"Symbol {symbol} not in current market data")
+                    continue
+                    
+                # Get execution price
+                price = signal.price if hasattr(signal, 'price') and signal.price is not None else price_lookup[symbol]
+                
+                # Convert action to quantity (positive for buy, negative for sell)
+                if action.lower() == 'sell':
+                    quantity = -abs(quantity)
+                    
+                # Add a simplified commission
+                commission = abs(quantity * price * 0.001)  # 0.1% commission
+                
+                transactions.append({
+                    'symbol': symbol,
+                    'quantity': quantity,
+                    'price': price,
+                    'commission': commission
+                })
+            except Exception as e:
+                self._logger.error(f"Error processing signal: {e}")
         
         return pd.DataFrame(transactions) if transactions else pd.DataFrame()
     
