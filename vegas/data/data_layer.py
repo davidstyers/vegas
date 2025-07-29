@@ -144,7 +144,7 @@ class DataLayer:
                 
         return False
     
-    def load_data(self, file_path: str = None, directory: str = None, file_pattern: str = "*.csv*") -> None:
+    def load_data(self, file_path: str = None, directory: str = None, file_pattern: str = "*.csv*", max_files: int = None) -> None:
         """Load market data from a file or directory.
         
         Args:
@@ -155,7 +155,7 @@ class DataLayer:
         if file_path:
             self._load_single_file(file_path)
         elif directory:
-            self._load_multiple_files(directory, file_pattern)
+            self._load_multiple_files(directory, file_pattern, max_files)
         else:
             # Try to load from database if no file specified
             self._try_load_from_database()
@@ -374,7 +374,7 @@ class DataLayer:
                 target_tz_str = str(self.timezone)
                 if current_tz_str != target_tz_str:
                     try:
-                        data_with_tz['timestamp'] = data_timestamps.dt.tz_convert(self.timezone)
+                        data_with_tz['timestamp'] = data_with_tz['timestamp'].dt.tz_convert(self.timezone)
                     except Exception as e:
                         self.logger.warning(f"Failed to convert timestamp timezone: {e}")
                 
@@ -421,21 +421,44 @@ class DataLayer:
             List of symbols
         """
         if date is None:
-            return sorted(list(self.symbols))
+            return sorted(list(self.symbols)) if self.symbols else []
             
         # Filter data by date and return unique symbols
-        if self.data is not None:
-            date_floor = pd.Timestamp(date).floor('D')
-            date_ceil = pd.Timestamp(date).floor('D') + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-            
-            symbols = self.data[
-                (self.data['timestamp'] >= date_floor) & 
-                (self.data['timestamp'] <= date_ceil)
-            ]['symbol'].unique()
-            
-            return sorted(list(symbols))
-            
-        return []
+        if self.data is not None and not self.data.empty:
+            try:
+                date_floor = pd.Timestamp(date).floor('D')
+                date_ceil = pd.Timestamp(date).floor('D') + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                
+                filtered_data = self.data[
+                    (self.data['timestamp'] >= date_floor) & 
+                    (self.data['timestamp'] <= date_ceil)
+                ]
+                
+                if not filtered_data.empty:
+                    symbols = filtered_data['symbol'].unique()
+                    return sorted(list(symbols))
+                else:
+                    self.logger.warning(f"No data available for date {date.date()}")
+                    # If no data for the specific date, try to get data from nearby dates
+                    window_size = 5  # Look 5 days before and after
+                    expanded_start = date_floor - pd.Timedelta(days=window_size)
+                    expanded_end = date_ceil + pd.Timedelta(days=window_size)
+                    
+                    nearby_data = self.data[
+                        (self.data['timestamp'] >= expanded_start) & 
+                        (self.data['timestamp'] <= expanded_end)
+                    ]
+                    
+                    if not nearby_data.empty:
+                        self.logger.info(f"Using symbols from nearby dates for {date.date()}")
+                        symbols = nearby_data['symbol'].unique()
+                        return sorted(list(symbols))
+            except Exception as e:
+                self.logger.error(f"Error getting universe for date {date}: {e}")
+        
+        # If we get here, we couldn't find any symbols for the date
+        self.logger.warning(f"Falling back to all known symbols for date {date}")
+        return sorted(list(self.symbols)) if self.symbols else []
     
     def get_available_date_range(self) -> tuple:
         """Get the available date range in the dataset."""
