@@ -5,7 +5,7 @@ This script implements a simple strategy that:
 1. Buys 100 shares of SPY on Monday of each week
 2. Sells all SPY shares on Friday of each week
 """
-import pandas as pd
+import polars as pl
 from vegas.strategy import Strategy, Signal, Context
 
 class WeeklySpyTrader(Strategy):
@@ -21,17 +21,17 @@ class WeeklySpyTrader(Strategy):
         context.shares = 100    # Buy/sell 100 shares each time
         context.currently_holding = False
     
-    def before_trading_start(self, context: Context, data: pd.DataFrame) -> None:
+    def before_trading_start(self, context: Context, data: pl.DataFrame) -> None:
         """Set the current date in the context.
         
         Args:
             context: Strategy context
             data: Market data for current day
         """
-        if not data.empty:
-            context.current_date = data['timestamp'].iloc[0].date()
+        if not data.is_empty():
+            context.current_date = data.select('timestamp').row(0)[0].date()
             
-    def handle_data(self, context: Context, data: pd.DataFrame) -> list[Signal]:
+    def handle_data(self, context: Context, data: pl.DataFrame) -> list[Signal]:
         """Process market data and generate trading signals.
         
         Args:
@@ -44,13 +44,13 @@ class WeeklySpyTrader(Strategy):
         signals = []
         
         # Filter for SPY data
-        spy_data = data[data['symbol'] == context.symbol]
+        spy_data = data.filter(pl.col('symbol') == context.symbol)
         
-        if spy_data.empty:
+        if spy_data.is_empty():
             return signals
         
         # Get current timestamp
-        timestamp = spy_data['timestamp'].iloc[0]
+        timestamp = spy_data.select('timestamp').row(0)[0]
         
         # Check if it's Monday (weekday=0)
         if timestamp.weekday() == 0 and not context.currently_holding:

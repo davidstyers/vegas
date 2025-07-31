@@ -1,117 +1,95 @@
 # Timezone Handling in Vegas
 
-When backtesting strategies across international markets or dealing with data from different timezones, proper timezone handling is essential for accurate results. Vegas provides comprehensive timezone support that allows you to normalize timestamps for consistent strategy execution.
+## Overview
 
-## Why Timezone Handling Matters
+Vegas provides robust timezone handling capabilities to ensure consistent processing of timestamp data across different markets and data sources. This document explains how timestamps are handled throughout the system.
 
-Consider the following scenarios where timezone handling is crucial:
+## Key Components
 
-1. **Trading across international markets**: If your strategy trades in both US and European markets, comparing timestamps without timezone normalization can lead to execution errors.
+### 1. Database-level Timezone Conversion
 
-2. **Time-based signals**: Strategies that rely on specific times of day (market open/close, lunch hours) need accurate timezone information.
+Timestamps are stored in the database in UTC format for consistency. When querying data from the database, Vegas can convert timestamps to the target timezone directly in the database query, which offers several advantages:
 
-3. **Data consistency**: Data from various sources may have different timezone information or none at all.
+- **Performance**: Converting at the database level is generally faster than post-query conversion
+- **Consistency**: All timestamp data is handled uniformly with clear timezone information
+- **Accuracy**: Avoids potential issues with daylight saving time transitions
 
-4. **Overnight positions**: Correctly accounting for overnight positions and end-of-day calculations requires proper timezone handling.
+### 2. Data Layer Timezone Configuration
 
-## Using Timezone Support
-
-### In Python Code
-
-```python
-from datetime import datetime
-from vegas.engine import BacktestEngine
-
-# Create engine with specific timezone
-engine = BacktestEngine(timezone="US/Eastern")
-
-# Load data - timestamps will be automatically converted to US/Eastern
-engine.load_data("data/example.csv")
-
-# Run backtest with dates in the specified timezone
-results = engine.run(
-    start=datetime(2022, 1, 1),
-    end=datetime(2022, 12, 31),
-    strategy=my_strategy,
-    initial_capital=100000.0
-)
-```
-
-### From Command Line
-
-```bash
-# Run with New York timezone
-vegas run my_strategy.py --timezone "US/Eastern" --start 2022-01-01 --end 2022-12-31
-
-# Run with Tokyo timezone
-vegas run my_strategy.py --timezone "Asia/Tokyo" --start 2022-01-01 --end 2022-12-31
-
-# Run with London timezone
-vegas run my_strategy.py --timezone "Europe/London" --start 2022-01-01 --end 2022-12-31
-```
-
-## How Timezone Handling Works
-
-Vegas handles timezones in the following way:
-
-1. **Input Data**: When loading data, timestamps without timezone information are assumed to be in UTC.
-
-2. **Conversion**: All timestamps are converted to the specified timezone during the data loading process.
-
-3. **Strategy Execution**: All timestamps passed to strategy callbacks are in the configured timezone.
-
-4. **Results**: All timestamps in the results (equity curve, transactions, etc.) use the configured timezone.
-
-## Accessing Timestamp Information in Strategies
-
-Within your strategy callbacks, you can access timestamp information in the configured timezone:
+The `DataLayer` class is configured with a timezone parameter that defines the target timezone for all data processing:
 
 ```python
-def handle_data(self, context, data):
-    # Get the current timestamp from data
-    timestamp = data['timestamp'].iloc[0]
-    
-    # Check current hour in the configured timezone
-    current_hour = timestamp.hour
-    
-    # Check day of week
-    day_of_week = timestamp.weekday()  # 0=Monday, 6=Sunday
-    
-    # Format timestamp for logging
-    formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')
-    self.logger.info(f"Processing data at {formatted_time}")
+# Initialize with Eastern time
+data_layer = DataLayer(timezone="America/New_York")
+
+# Or use UTC (default)
+data_layer = DataLayer(timezone="UTC")
 ```
 
-## Common Timezone Identifiers
+This timezone setting is used throughout the system:
 
-Vegas uses the IANA timezone database via pytz. Some common timezone identifiers:
+1. When querying data from the database
+2. When loading data from files
+3. When converting timestamps in memory
 
-| Region | Identifier | Description |
-|--------|------------|-------------|
-| UTC | "UTC" | Coordinated Universal Time (default) |
-| United States | "US/Eastern" | Eastern Time (New York) |
-| United States | "US/Central" | Central Time (Chicago) |
-| United States | "US/Pacific" | Pacific Time (Los Angeles) |
-| Europe | "Europe/London" | UK Time |
-| Europe | "Europe/Paris" | Central European Time |
-| Asia | "Asia/Tokyo" | Japan Time |
-| Asia | "Asia/Shanghai" | China Time |
-| Australia | "Australia/Sydney" | Sydney Time |
+### 3. Engine-level Configuration
 
-For a full list of available timezones, see the [IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+The `BacktestEngine` class inherits the timezone setting and passes it to the data layer:
+
+```python
+# Create engine with timezone
+engine = BacktestEngine(timezone="Asia/Tokyo")
+```
+
+## Implementation Details
+
+### Database Queries
+
+When querying data, the timezone conversion happens directly in the SQL query:
+
+```sql
+SELECT
+    CAST(timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York' AS TIMESTAMP) AS timestamp,
+    symbol, open, high, low, close, volume, source
+FROM market_data
+```
+
+This approach ensures that:
+
+1. All timestamp data is stored consistently in UTC
+2. The timezone conversion happens efficiently at the database level
+3. Applications receive the data in their preferred timezone
+
+### In-memory Conversion
+
+For in-memory data or when the database is not available, timestamps are converted using Polars:
+
+```python
+df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=self.timezone)))
+```
 
 ## Best Practices
 
-1. **Be consistent**: Choose a single timezone for your backtesting workflow and stick with it.
+1. **Always specify a timezone** when initializing the system to ensure consistent behavior
+2. **Use IANA timezone identifiers** (e.g., "America/New_York" instead of "EST")
+3. **Consider your data sources' timezones** when analyzing data and generating signals
 
-2. **Use UTC for storage**: When storing market data, use UTC timezone as a standard practice.
+## Timezone and Trading Hours
 
-3. **Match market timezone**: For strategies focused on a single market, consider using that market's native timezone (e.g., US/Eastern for US equities).
+When specifying market hours for regular trading hours filtering, be aware of the timezone context:
 
-4. **Handle DST changes**: Be aware that Daylight Saving Time changes can affect time-based strategies. Vegas handles these transitions automatically.
+```python
+# New York market hours in Eastern Time
+engine.set_trading_hours(market_name="NYSE", open_time="09:30", close_time="16:00")
+```
 
-5. **Document timezone usage**: Always document which timezone your strategy is designed to work with.
+The trading hours are interpreted in the context of the configured timezone.
 
-## Example
+## Testing Timezone Handling
 
-See `examples/timezone_example.py` for a complete demonstration of timezone handling in Vegas. 
+You can test the timezone handling using the `test_timezone_db_conversion.py` example script, which:
+
+1. Creates sample data with timestamps
+2. Tests conversion with multiple timezones
+3. Compares database-level conversion vs. post-query conversion
+4. Verifies timestamp accuracy and performance

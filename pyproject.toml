@@ -12,11 +12,11 @@ license = "MIT"
 
 [tool.poetry.dependencies]
 python = ">=3.13,<4.0"
-pandas = ">=1.3.0"
+polars = ">=0.20.0"
 numpy = ">=1.20.0"
 matplotlib = ">=3.4.0"
 zstandard = ">=0.15.0"
-quantstats = ">=0.0.59"
+quantstats = ">=0.0.59"  # Kept for compatibility but will use polars internally
 duckdb = ">=0.9.0"
 pyarrow = ">=14.0.0"
 cython = ">=3.0.0"
