@@ -62,13 +62,14 @@ class Portfolio:
             market_data: DataFrame with current market data (must include columns: symbol, close)
         """
         # Process transactions
-        if not transactions.empty:
-            for _, txn in transactions.iterrows():
+        if not transactions.is_empty():
+            for txn in transactions.to_dicts():
                 symbol = txn['symbol']
                 quantity = txn['quantity']
                 price = txn['price']
                 commission = txn.get('commission', 0.0)
-                self._logger.info(f"{timestamp}: {quantity} of {symbol} at {price}")
+                self._logger.info(f"{timestamp[0].strftime("%Y-%m-%d %H:%M:%S")}: {quantity} of {symbol} at {price}")
+
                 
                 # For sell transactions, validate we have enough shares
                 if quantity < 0:
@@ -136,7 +137,7 @@ class Portfolio:
         
         if self.positions:
             # Create a lookup table for current prices
-            price_lookup = market_data.set_index('symbol')['close'].to_dict()
+            price_lookup = dict(zip(market_data['symbol'], market_data['close']))
             
             for symbol, quantity in self.positions.items():
                 if symbol in price_lookup:

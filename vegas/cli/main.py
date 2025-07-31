@@ -118,9 +118,8 @@ def run_backtest(args):
         generate_outputs(results, strategy_class.__name__, args)
         
         return 0
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return 1
+    finally:
+        engine.data_layer.close()
 
 
 def load_data(engine, args, logger):
@@ -556,7 +555,7 @@ def main():
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
     common_parser.add_argument('--db-dir', type=str, default='db', help='Database directory')
-    common_parser.add_argument('--timezone', type=str, default='UTC', help='Timezone for data (e.g., UTC, US/Eastern, Europe/London)')
+    common_parser.add_argument('--timezone', type=str, default='US/Eastern', help='Timezone for data (e.g., UTC, US/Eastern, Europe/London)')
     
     # Run command
     run_parser = subparsers.add_parser('run', parents=[common_parser], help='Run a backtest')

@@ -5,6 +5,7 @@ A focused Python backtesting framework for event-driven trading strategies. Vega
 ## Features
 
 - **Event-Driven Architecture**: Sequential processing of market events for realistic simulation
+- **High-Performance Data Processing**: Uses Polars for lightning-fast dataframe operations
 - **Simple, Clean Design**: Focused codebase optimized for readability and extensibility
 - **Comprehensive Analytics**: Performance metrics and visualization
 - **DuckDB and Parquet**: Efficient data storage and querying
@@ -26,6 +27,7 @@ pip install .
 
 ```python
 from datetime import datetime
+import polars as pl
 from vegas.engine import BacktestEngine
 from vegas.strategy import Strategy, Signal
 
@@ -38,11 +40,11 @@ class MovingAverageCrossover(Strategy):
     def before_trading_start(self, context, data):
         # Calculate signals before market opens
         for symbol in context.symbols:
-            symbol_data = data[data['symbol'] == symbol]
+            symbol_data = data.filter(pl.col('symbol') == symbol)
             if len(symbol_data) >= context.long_window:
-                prices = symbol_data.sort_values('timestamp')['close']
-                short_ma = prices[-context.short_window:].mean()
-                long_ma = prices[-context.long_window:].mean()
+                prices = symbol_data.sort('timestamp').get_column('close')
+                short_ma = prices.tail(context.short_window).mean()
+                long_ma = prices.tail(context.long_window).mean()
                 
                 if short_ma > long_ma:
                     # Bullish signal
