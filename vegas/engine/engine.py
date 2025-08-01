@@ -6,6 +6,7 @@ This module provides a streamlined backtesting engine.
 from datetime import datetime
 import logging
 import time
+from pandas import tseries
 import polars as pl
 
 from vegas.data import DataLayer
@@ -185,7 +186,7 @@ class BacktestEngine:
         market_hours = None
         if self._ignore_extended_hours:
             market_hours = (self._market_open_time, self._market_close_time)
-        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=["SPY"])
+        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=context.symbols)
         
         if market_data.is_empty():
             self._logger.warning("No data available for the specified period")
@@ -272,35 +273,34 @@ class BacktestEngine:
                 sorted_timestamps = sorted(partitioned.keys())
                 
                 # Process each timestamp chronologically
-                for timestamp in sorted_timestamps:
-                    timestamp_data = partitioned[timestamp]
+                for (ts,), ts_data in daily_data.group_by('timestamp', maintain_order=True):
                     # Update context with current timestamp
-                    context.current_date = timestamp.date() if hasattr(timestamp, 'date') else timestamp
+                    context.current_date = ts.date() if hasattr(ts, 'date') else ts
                     
                     # Call handle_data for each timestamp to generate trading signals
                     if hasattr(self.strategy, 'handle_data'):
-                        signals = self.strategy.handle_data(context, timestamp_data)
+                        signals = self.strategy.handle_data(context, ts_data)
                         
                         if signals:
                             # Process signals and create transactions
-                            transactions = self._create_transactions_from_signals(signals, timestamp_data)
+                            transactions = self._create_transactions_from_signals(signals, ts_data)
                             
                             # Update portfolio with transactions
                             if len(transactions) > 0:
                                 self.portfolio.update_from_transactions(
-                                    timestamp, 
+                                    ts, 
                                     transactions,
-                                    timestamp_data
+                                    ts_data
                                 )
                     
                     # Update portfolio state for this timestamp even without transactions
-                    self.portfolio.update_from_transactions(timestamp, pl.DataFrame(), timestamp_data)
+                    self.portfolio.update_from_transactions(ts, pl.DataFrame(), ts_data)
                     
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close
-                    is_last_timestamp = timestamp == daily_data.select(pl.col('timestamp').max()).item()
+                    is_last_timestamp = ts == daily_data.select(pl.col('timestamp').max()).item()
                     if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
-                        self.strategy.on_market_close(context, timestamp_data, self.portfolio)
+                        self.strategy.on_market_close(context, ts_data, self.portfolio)
             
             # Prepare results
             return {

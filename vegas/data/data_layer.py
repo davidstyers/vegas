@@ -433,13 +433,13 @@ class DataLayer:
         """Get information about loaded data."""
         start_date, end_date = self.get_available_date_range()
         
-        # if start_date is None or end_date is None:
-        #     return {
-        #         "symbol_count": 0,
-        #         "start_date": None,
-        #         "end_date": None,
-        #         "days": 0
-        #     }
+        if start_date is None or end_date is None:
+            return {
+                "symbol_count": 0,
+                "start_date": None,
+                "end_date": None,
+                "days": 0
+            }
             
         # Calculate days
         if isinstance(start_date, datetime) and isinstance(end_date, datetime):

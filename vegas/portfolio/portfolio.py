@@ -3,10 +3,12 @@
 This module provides a portfolio tracking system for event-driven backtesting.
 """
 
+from operator import eq
 from typing import Dict, Any
 from datetime import datetime
 import logging
-import pandas as pd
+import polars as pl
+from polars import dataframe
 
 
 class Position:
@@ -68,7 +70,7 @@ class Portfolio:
                 quantity = txn['quantity']
                 price = txn['price']
                 commission = txn.get('commission', 0.0)
-                self._logger.info(f"{timestamp[0].strftime("%Y-%m-%d %H:%M:%S")}: {quantity} of {symbol} at {price}")
+                self._logger.info(f"{timestamp.strftime("%Y-%m-%d %H:%M:%S")}: {quantity} of {symbol} at {price}")
 
                 
                 # For sell transactions, validate we have enough shares
@@ -179,8 +181,12 @@ class Portfolio:
             DataFrame with columns: timestamp, equity, cash
         """
         if not self.equity_history:
-            return pd.DataFrame(columns=['timestamp', 'equity', 'cash'])
-        return pd.DataFrame(self.equity_history)
+            return pl.DataFrame(schema={
+                'timestamp': pl.Datetime('ns'),
+                'equity': pl.Float64,
+                'cash': pl.Float64
+                })
+        return pl.DataFrame(self.equity_history)
     
     def get_returns(self):
         """Get portfolio returns.
@@ -190,11 +196,19 @@ class Portfolio:
         """
         equity_curve = self.get_equity_curve()
         if len(equity_curve) <= 1:
-            return pd.DataFrame(columns=['timestamp', 'return', 'cumulative_return'])
+            return pl.DataFrame(schema={
+                'timestamp': pl.Datetime('ns'),    
+                'return': pl.Float64,
+                'cumulative_return': pl.Float64,
+                })
         
         # Calculate returns with explicit fill_method parameter to avoid deprecation warning
-        equity_curve['return'] = equity_curve['equity'].pct_change(fill_method=None).fillna(0)
-        equity_curve['cumulative_return'] = (1 + equity_curve['return']).cumprod() - 1
+        equity_curve = equity_curve.with_columns(
+            (pl.col('equity').pct_change().fill_null(0)).alias('return')
+        )
+        equity_curve = equity_curve.with_columns(
+            (1 + pl.col('return')).cum_prod().alias('cumulative_return')
+        )
         
         return equity_curve[['timestamp', 'return', 'cumulative_return']]
     
@@ -205,8 +219,14 @@ class Portfolio:
             DataFrame with transaction history
         """
         if not self.transaction_history:
-            return pd.DataFrame(columns=['timestamp', 'symbol', 'quantity', 'price', 'commission'])
-        return pd.DataFrame(self.transaction_history)
+            return pl.DataFrame(schema={
+                'timestamp': pl.Datetime('ns'),    
+                'symbol': pl.String,
+                'quantity': pl.Int64,
+                'price': pl.Float64,
+                'commission': pl.Float64
+                })
+        return pl.DataFrame(self.transaction_history)
     
     def get_positions(self):
         """Get current portfolio positions as Position objects.
@@ -239,8 +259,13 @@ class Portfolio:
             })
             
         if not positions_data:
-            return pd.DataFrame(columns=['symbol', 'quantity', 'value', 'weight'])
-        return pd.DataFrame(positions_data)
+            return pl.DataFrame(schema={
+                'symbol': pl.String,    
+                'quantity': pl.Int64,
+                'value': pl.Float64,
+                'weight': pl.Float64,
+                })
+        return pl.DataFrame(positions_data)
     
     def get_positions_history(self):
         """Get the history of portfolio positions.
@@ -251,17 +276,16 @@ class Portfolio:
         position_history = {}
         
         # Group position history by timestamp
-        df = pd.DataFrame(self.position_history)
-        if not df.empty:
+        df = pl.DataFrame(self.position_history)
+        if not df.is_empty():
             # Convert to dictionary format: timestamp -> {symbol -> {quantity, value}}
-            for timestamp, group in df.groupby('timestamp'):
-                symbol_dict = {}
-                for _, row in group.iterrows():
-                    symbol_dict[row['symbol']] = {
-                        'quantity': row['quantity'],
-                        'value': row['value']
-                    }
-                position_history[timestamp] = symbol_dict
+            position_history = {
+                ts: {
+                    row['symbol']: {'quantity': row['quantity'], 'value': row['value']}
+                    for row in group.iter_rows(named=True)
+                }
+                for ts, group in df.group_by('timestamp')
+            }
                 
         return position_history
     
@@ -290,19 +314,35 @@ class Portfolio:
         
         if len(equity_df) > 1:
             # Calculate drawdown
-            equity_df['previous_peak'] = equity_df['equity'].cummax()
-            equity_df['drawdown'] = (equity_df['equity'] - equity_df['previous_peak']) / equity_df['previous_peak'] * 100
-            stats['max_drawdown'] = abs(equity_df['drawdown'].min())
-            stats['max_drawdown_pct'] = abs(equity_df['drawdown'].min())
+            equity_df = equity_df.with_columns(
+                 pl.col('equity').cum_max().alias('previous_peak')
+                 )
+            equity_df = equity_df.with_columns(
+                (
+                    (pl.col('equity') - pl.col('previous_peak')) / pl.col('previous_peak') * 100
+                ).alias('drawdown')
+            )
+
+            max_drawdown = equity_df.select(pl.col('drawdown').min()).item()
+            stats['max_drawdown'] = abs(max_drawdown)
+            stats['max_drawdown_pct'] = abs(max_drawdown)
+
             
             # Calculate Sharpe ratio (assuming daily data and risk-free rate of 0)
-            if len(returns_df) > 1:
-                daily_returns = returns_df['return'].values
-                if len(daily_returns) > 0 and daily_returns.std() > 0:
-                    stats['sharpe_ratio'] = (daily_returns.mean() / daily_returns.std()) * (252 ** 0.5)
-                    stats['annual_return_pct'] = ((1 + daily_returns.mean()) ** 252 - 1) * 100
+            if returns_df.height > 1:
+                daily_returns = returns_df['return']
+                mean_return = daily_returns.mean()
+                std_return = daily_returns.std()
+
+                if std_return and std_return > 0:
+                    stats['sharpe_ratio'] = (mean_return / std_return) * (252 ** 0.5)
+                    stats['annual_return_pct'] = ((1 + mean_return) ** 252 - 1) * 100
                 else:
                     stats['sharpe_ratio'] = 0.0
                     stats['annual_return_pct'] = 0.0
+            else:
+                stats['sharpe_ratio'] = 0.0
+                stats['annual_return_pct'] = 0.0
+
         
         return stats 
