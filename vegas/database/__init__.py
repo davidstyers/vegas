@@ -2,4 +2,5 @@
 
 from vegas.database.database import DatabaseManager, ParquetManager
 
-__all__ = ["DatabaseManager", "ParquetManager"] 
+# Re-export public API, including trading days helper
+__all__ = ["DatabaseManager", "ParquetManager"]

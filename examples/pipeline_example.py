@@ -3,15 +3,13 @@
 This example demonstrates how to use the pipeline system to precompute
 data for a momentum-based trading strategy.
 """
-import pandas as pd
+import polars as pl
 import numpy as np
 
-from vegas.engine import BacktestEngine
 from vegas.strategy import Strategy, Signal
 from vegas.pipeline import (
     Pipeline, CustomFactor,
-    SimpleMovingAverage, Returns,
-    StaticAssets, StandardDeviation
+    SimpleMovingAverage, StandardDeviation
 )
 
 
@@ -38,7 +36,7 @@ class MeanReversion(CustomFactor):
     """
     Custom factor that identifies potential mean reversion candidates.
     
-    This factor looks for securities that are oversold based on their 
+    This factor looks for securities that are oversold based on their
     recent price movements relative to a longer-term moving average.
     """
     inputs = ['close']
@@ -83,18 +81,25 @@ class PipelineStrategy(Strategy):
         try:
             # Get the pipeline output
             results = context._engine.pipeline_output('my_pipeline')
-            
-            if results.empty:
-                print("Pipeline returned no results")
-                return
-            
-            # Filter for stocks with high combined score
-            context.longs = results[results['combined_score'] > 0.5].index.get_level_values('symbol').tolist()
-            context.shorts = results[results['combined_score'] < -0.5].index.get_level_values('symbol').tolist()
-            
+
+            longs = (
+                results
+                .filter(pl.col("combined_score") > 0.5)
+                .select("symbol")
+                .to_series()
+                .to_list()
+            )
+            shorts = (
+                results
+                .filter(pl.col("combined_score") < -0.5)
+                .select("symbol")
+                .to_series()
+                .to_list()
+            )
+
             # Limit to max positions
-            context.longs = context.longs[:context.max_positions]
-            context.shorts = context.shorts[:context.max_positions]
+            context.longs = longs[:context.max_positions]
+            context.shorts = shorts[:context.max_positions]
             
             print(f"Pipeline identified {len(context.longs)} long and {len(context.shorts)} short candidates")
             
@@ -118,13 +123,31 @@ class PipelineStrategy(Strategy):
             current_positions = {pos.symbol for pos in positions} if positions else set()
         except Exception as e:
             print(f"Error getting positions: {e}")
+
+        symbols_in_data = set(data.select("symbol").to_series().to_list())
+        
+        # Helper to safely get the latest close for a symbol from Polars data
+        def get_price(sym: str) -> float | None:
+            try:
+                s = (
+                    data
+                    .filter(pl.col("symbol") == sym)
+                    .select("close")
+                    .to_series()
+                )
+                if s.len() == 0:
+                    return None
+                return float(s.item())
+            except Exception:
+                return None
         
         # Process long signals
         for symbol in context.longs:
-            if symbol not in current_positions and symbol in data['symbol'].values:
-                # Calculate position size based on portfolio value
-                price = data.loc[data['symbol'] == symbol, 'close'].iloc[0]
-                quantity = 10  # Default to 10 shares if we can't calculate
+            if symbol not in current_positions and symbol in symbols_in_data:
+                price = get_price(symbol)
+                if price is None or price <= 0:
+                    continue
+                quantity = 10  # Default
                 
                 if hasattr(context.portfolio, 'current_equity'):
                     position_value = context.portfolio.current_equity * context.position_size
@@ -139,10 +162,11 @@ class PipelineStrategy(Strategy):
         
         # Process short signals (if allowed)
         for symbol in context.shorts:
-            if symbol not in current_positions and symbol in data['symbol'].values:
-                # Calculate position size based on portfolio value
-                price = data.loc[data['symbol'] == symbol, 'close'].iloc[0]
-                quantity = 10  # Default to 10 shares if we can't calculate
+            if symbol not in current_positions and symbol in symbols_in_data:
+                price = get_price(symbol)
+                if price is None or price <= 0:
+                    continue
+                quantity = 10  # Default
                 
                 if hasattr(context.portfolio, 'current_equity'):
                     position_value = context.portfolio.current_equity * context.position_size
@@ -185,7 +209,7 @@ def make_pipeline():
         inputs=['volume'],
         window_length=30
     )
-    liquid_stocks = volume_sma > 100000  # Only stocks with decent volume
+    liquid_stocks = volume_sma > 100_000  # Only stocks with decent volume
     
     return Pipeline(
         columns={
@@ -196,31 +220,3 @@ def make_pipeline():
         },
         screen=liquid_stocks
     )
-
-
-def run_pipeline_backtest():
-    """Run a backtest using the pipeline strategy."""
-    start_date = pd.Timestamp('2020-01-01')
-    end_date = pd.Timestamp('2020-12-31')
-    
-    # Create the engine
-    engine = BacktestEngine()
-    
-    # Load data (assuming you have data available)
-    #engine.load_data(directory="../db")
-    
-    # Create and run the strategy
-    strategy = PipelineStrategy()
-    results = engine.run(start_date, end_date, strategy, initial_capital=100000)
-    
-    # Print results
-    print("Backtest completed")
-    print(f"Final portfolio value: ${results['stats']['final_equity']:.2f}")
-    print(f"Total return: {results['stats']['total_return_pct']:.2f}%")
-    print(f"Number of trades: {results['stats']['num_trades']}")
-    
-    return results
-
-
-if __name__ == "__main__":
-    run_pipeline_backtest() 

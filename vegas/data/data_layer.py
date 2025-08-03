@@ -22,7 +22,7 @@ from vegas.database import DatabaseManager
 
 
 class DataLayer:
-    """Minimal, vectorized data layer for the Vegas backtesting engine."""
+    """Data layer for the Vegas backtesting engine."""
     
     def __init__(self, data_dir: str = "db", test_mode: bool = False, timezone: str = "EST"):
         """Initialize the DataLayer.
@@ -323,18 +323,18 @@ class DataLayer:
         # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
-                data = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols, timezone=self.timezone)
-                if not data.is_empty():
+                self.data = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols, timezone=self.timezone)
+                if not self.data.is_empty():
                     if market_hours:
                         start = _time_str_to_minutes(market_hours[0])
                         end = _time_str_to_minutes(market_hours[1])
-                        return data.filter(
+                        return self.data.filter(
                             (pl.col("timestamp").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp").dt.minute().cast(pl.Int32)).is_between(start, end, closed="left")
                         )
                     else:
-                        return data
-            except Exception as e:
-                self.logger.warning(f"Failed to get data from database: {e}")
+                        return self.data
+            finally:
+                self.logger.info("Data loaded from database")
             
         # No data available
         return pl.DataFrame()
@@ -353,13 +353,19 @@ class DataLayer:
                 except Exception:
                     pass
             return []
+    
+    def get_all_trading_days(self) -> List[datetime]:
+        """Get all trading days in the dataset."""
+        if self.use_database and self.db_manager:
+            return self.db_manager.get_available_trading_days()
+        return []
             
         # Get unique dates from timestamp column
         return self.data.select(
             pl.col('timestamp').dt.date().alias('date')
         ).unique().sort('date').get_column('date').to_list()
     
-    def get_universe(self, date: datetime = None) -> List[str]:
+    def get_universe(self, date: datetime.date = None) -> List[str]:
         """Get the universe of available symbols.
         
         Args:
@@ -375,19 +381,19 @@ class DataLayer:
         if self.data is not None and not self.data.is_empty():
             try:
                 # Get the date portion only
-                date_floor = datetime.combine(date.date(), datetime.min.time())
-                date_ceil = datetime.combine(date.date(), datetime.max.time())
-                
+                date_floor = datetime.combine(date, datetime.min.time())
+                date_ceil = datetime.combine(date, datetime.max.time())
+                date_floor, date_ceil = date_floor.astimezone(pytz.timezone(self.timezone)), date_ceil.astimezone(pytz.timezone(self.timezone))
+
                 filtered_data = self.data.filter(
-                    (pl.col('timestamp') >= date_floor) & 
-                    (pl.col('timestamp') <= date_ceil)
+                    (pl.col("timestamp") >= pl.lit(date_floor).cast(pl.Datetime("us", self.timezone))) &
+                    (pl.col("timestamp") <= pl.lit(date_ceil).cast(pl.Datetime("us", self.timezone)))
                 )
-                
                 if not filtered_data.is_empty():
                     symbols = filtered_data.select('symbol').unique().to_series().to_list()
-                    return sorted(symbols)
+                    return symbols
                 else:
-                    self.logger.warning(f"No data available for date {date.date()}")
+                    self.logger.warning(f"No data available for date {date}")
                     # If no data for the specific date, try to get data from nearby dates
                     window_size = 5  # Look 5 days before and after
                     expanded_start = date_floor - timedelta(days=window_size)
@@ -399,15 +405,15 @@ class DataLayer:
                     )
                     
                     if not nearby_data.is_empty():
-                        self.logger.info(f"Using symbols from nearby dates for {date.date()}")
+                        self.logger.info(f"Using symbols from nearby dates for {date}")
                         symbols = nearby_data.select('symbol').unique().to_series().to_list()
-                        return sorted(symbols)
+                        return symbols
             except Exception as e:
                 self.logger.error(f"Error getting universe for date {date}: {e}")
         
         # If we get here, we couldn't find any symbols for the date
         self.logger.warning(f"Falling back to all known symbols for date {date}")
-        return sorted(list(self.symbols)) if self.symbols else []
+        return list(self.symbols) if self.symbols else []
     
     def get_available_date_range(self) -> tuple:
         """Get the available date range in the dataset."""
@@ -604,60 +610,33 @@ class DataLayer:
         # No data available
         return pl.DataFrame()
     
-    def get_trading_days(self, start_date: datetime, end_date: datetime) -> List[datetime]:
-        """Get all trading days in the specified date range.
-        
-        Args:
-            start_date: Start date
-            end_date: End date
-            
-        Returns:
-            DatetimeIndex with trading days
+    def get_trading_days(self, start_date: datetime, end_date: datetime) -> pl.Series:
+        """Return unique trading days (pl.Date) within [start_date, end_date] that have data.
         """
-        # Ensure dates are timezone-aware
-        start_ts = start_date
-        end_ts = end_date
-        
-        if start_ts.tz is None:
-            start_ts = start_ts.tz_localize(self.timezone)
-        if end_ts.tz is None:
-            end_ts = end_ts.tz_localize(self.timezone)
-            
-        # First try to get data from the current dataset
-        if self.data is not None:
-            # Make sure timestamps have timezone info
-            data_with_tz = self.data.clone()
-            data_timestamps = data_with_tz['timestamp']
-            
-            if data_timestamps.dt.tz is None:
-                # Localize to UTC first, then convert to target timezone
-                data_with_tz['timestamp'] = data_timestamps.dt.tz_localize('UTC')
-                try:
-                    data_with_tz['timestamp'] = data_with_tz['timestamp'].dt.tz_convert(self.timezone)
-                except Exception as e:
-                    self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-            else:
-                # Compare string representations instead of .zone attribute
-                current_tz_str = str(data_timestamps.dt.tz)
-                target_tz_str = str(self.timezone)
-                if current_tz_str != target_tz_str:
-                    try:
-                        data_with_tz['timestamp'] = data_timestamps.dt.tz_convert(self.timezone)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-                
-            # Filter by date range and extract unique dates
-            filtered_data = data_with_tz[
-                (data_with_tz['timestamp'] >= start_ts) & 
-                (data_with_tz['timestamp'] <= end_ts)
-            ]
-            
-            if not filtered_data.is_empty():
-                # Extract unique dates (just the date part, not time)
-                # Get unique dates from timestamp
-                dates = filtered_data.select(
-                    pl.col('timestamp').dt.date().alias('date')).unique().sort('date').get_column('date').to_list()
-        return dates
+        # No data available
+        if self.data is None or self.data.is_empty():
+            return pl.Series("date", [], dtype=pl.Date)
+
+        # Normalize bounds to polars Datetime in configured timezone (eager literals)
+        start_ts = start_date.astimezone(pytz.timezone(self.timezone))
+        end_ts = end_date.astimezone(pytz.timezone(self.timezone))
+
+        filtered = self.data.filter(
+                (pl.col("timestamp") >= pl.lit(start_ts).cast(pl.Datetime("us", self.timezone))) &
+                (pl.col("timestamp") <= pl.lit(end_ts).cast(pl.Datetime("us", self.timezone)))
+            )
+
+        if filtered.is_empty():
+            return pl.Series("date", [], dtype=pl.Date)
+
+        # Extract unique dates and return as Series
+        dates_df = (
+            filtered
+            .select(pl.col("timestamp").dt.date().alias("date"))
+            .unique()
+            .sort("date")
+        )
+        return dates_df.get_column("date")
     
     def get_data_for_date(self, date: datetime) -> pl.DataFrame:
         """Get all market data for a specific date.

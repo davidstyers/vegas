@@ -742,6 +742,34 @@ class DatabaseManager:
                         f"{total_rows} total rows ingested")
         return total_rows
     
+    def get_available_trading_days(self) -> pl.Series:
+        """Return all UTC trading days that have any data across the entire database.
+        
+        Definition:
+          - Trading day is any unique UTC calendar date for which at least one row exists
+            in the market_data view for any symbol.
+        
+        Returns:
+          pl.Series of dtype pl.Date sorted ascending, empty if no data.
+        """
+        try:
+            df = self.query_to_df(
+                """
+                SELECT DISTINCT CAST(DATE_TRUNC('day', timestamp) AS DATE) AS date
+                FROM market_data
+                ORDER BY date
+                """
+            )
+            if df.is_empty() or "date" not in df.columns:
+                return pl.Series("date", [], dtype=pl.Date)
+            # Ensure dtype is pl.Date
+            if df.schema["date"] != pl.Date:
+                df = df.with_columns(pl.col("date").cast(pl.Date))
+            return df.get_column("date")
+        except Exception as e:
+            self.logger.error(f"Failed to get available trading days: {e}")
+            return pl.Series("date", [], dtype=pl.Date)
+    
     def get_available_dates(self) -> pl.DataFrame:
         """Get the date range and day count available in the database.
         
@@ -840,7 +868,7 @@ class DatabaseManager:
         Returns:
             DataFrame with data source information
         """
-        return self.query_to_df("SELECT * FROM data_sources ORDER BY added_date DESC")
+        return self.query_to_df("SELECT * FROM data_sources")
     
     def get_database_size(self) -> int:
         """Get the size of the database file in bytes.

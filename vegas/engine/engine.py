@@ -3,7 +3,7 @@
 This module provides a streamlined backtesting engine.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import time
 from pandas import tseries
@@ -186,7 +186,10 @@ class BacktestEngine:
         market_hours = None
         if self._ignore_extended_hours:
             market_hours = (self._market_open_time, self._market_close_time)
-        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=context.symbols)
+        
+        symbols = context.__dict__.get('symbols')
+
+        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=symbols)
         
         if market_data.is_empty():
             self._logger.warning("No data available for the specified period")
@@ -249,7 +252,7 @@ class BacktestEngine:
                             pipeline, 
                             start_date=day_timestamp,
                             end_date=day_timestamp
-                        )
+                            )
                         if not pipeline_result.empty:
                             # Make results available via pipeline_output
                             self._pipeline_results[name] = pipeline_result
@@ -258,8 +261,8 @@ class BacktestEngine:
                             )
                         else:
                             self._logger.warning(f"Pipeline '{name}' returned empty results for {date}")
-                    except Exception as e:
-                        self._logger.error(f"Error computing pipeline '{name}' for {date}: {e}")
+                    finally:
+                        pass
                 
                 # Call before_trading_start at the beginning of each day
                 if hasattr(self.strategy, 'before_trading_start'):
