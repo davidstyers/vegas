@@ -131,7 +131,7 @@ class Factor(Term):
         Factor
             A new factor that will compute the ranking.
         """
-        from vegas.pipeline.factors.rank import Rank
+        from vegas.pipeline.factors import Rank
         return Rank(self, method=method, ascending=ascending, mask=mask or self.mask)
     
     def top(self, N, mask=None) -> 'Filter':
@@ -150,7 +150,9 @@ class Factor(Term):
         Filter
             A filter matching the top N assets.
         """
-        return self.rank(ascending=False, mask=mask).top(N)
+        # Use a dedicated TopN filter over the factor directly.
+        from vegas.pipeline.filters.advanced import TopN
+        return TopN(self, int(N), ascending=False, mask=mask or self.mask)
     
     def bottom(self, N, mask=None) -> 'Filter':
         """
@@ -168,7 +170,8 @@ class Factor(Term):
         Filter
             A filter matching the bottom N assets.
         """
-        return self.rank(ascending=True, mask=mask).top(N)
+        from vegas.pipeline.filters.advanced import TopN
+        return TopN(self, int(N), ascending=True, mask=mask or self.mask)
     
     def zscore(self, mask=None) -> 'Factor':
         """
@@ -261,7 +264,9 @@ class Filter(Term):
     
     Filters are used to exclude or include assets based on various criteria.
     """
-    dtype = np.bool_
+    # Use dtype=object so NumPy ufuncs don't coerce bools to float64 when combining masks.
+    # We'll ensure boolean dtype at the engine boundary before applying the screen.
+    dtype = np.dtype(object)
     missing_value = False
     
     def __and__(self, other) -> 'Filter':
@@ -305,31 +310,56 @@ class BinaryFilter(Filter):
         super().__init__(inputs=inputs, window_length=window_length)
         
     def compute(self, today, assets, out, *inputs):
-        """Apply the binary operation to inputs."""
-        if len(inputs) == 0:
-            # Both inputs are scalars
-            if self.op == '&':
-                out[:] = self.left & self.right
-            elif self.op == '|':
-                out[:] = self.left | self.right
-        elif len(inputs) == 1:
-            # One input is a scalar, one is a Term
-            if self.left is inputs[0]:
-                if self.op == '&':
-                    out[:] = inputs[0] & self.right
-                elif self.op == '|':
-                    out[:] = inputs[0] | self.right
+        """Apply the binary operation to inputs, producing a strict boolean mask."""
+        def to_bool_array(val, length):
+            # Convert scalars or arrays to strict boolean ndarray of expected length.
+            if isinstance(val, (bool, np.bool_)):
+                return np.full(length, bool(val), dtype=bool)
+            arr = np.asarray(val)
+            # If object dtype (from upstream), coerce via truthiness to bool elementwise where possible.
+            if arr.dtype == object:
+                # Convert None/np.nan to False, truthy to True
+                coerced = np.zeros(arr.shape, dtype=bool)
+                it = np.nditer(arr, flags=['refs_ok', 'multi_index'], op_flags=['readonly'])
+                for x in it:
+                    v = x.item()
+                    coerced[it.multi_index] = bool(v) if isinstance(v, (bool, np.bool_, int, float)) else bool(v is True)
+                arr = coerced
             else:
-                if self.op == '&':
-                    out[:] = self.left & inputs[0]
-                elif self.op == '|':
-                    out[:] = self.left | inputs[0]
+                arr = arr.astype(bool, copy=False)
+            # Ensure 1-D of correct length
+            arr = np.ravel(arr)
+            if arr.shape[0] != length:
+                # Broadcast scalar-like
+                if arr.shape[0] == 1:
+                    arr = np.full(length, bool(arr[0]), dtype=bool)
+                else:
+                    # On mismatch, fail-safe to all False
+                    arr = np.zeros(length, dtype=bool)
+            return arr
+
+        n = len(assets)
+        if len(inputs) == 0:
+            left = to_bool_array(self.left, n)
+            right = to_bool_array(self.right, n)
+        elif len(inputs) == 1:
+            if self.left is inputs[0]:
+                left = to_bool_array(inputs[0], n)
+                right = to_bool_array(self.right, n)
+            else:
+                left = to_bool_array(self.left, n)
+                right = to_bool_array(inputs[0], n)
         else:
-            # Both inputs are Terms
-            if self.op == '&':
-                out[:] = inputs[0] & inputs[1]
-            elif self.op == '|':
-                out[:] = inputs[0] | inputs[1]
+            left = to_bool_array(inputs[0], n)
+            right = to_bool_array(inputs[1], n)
+
+        if self.op == '&':
+            np.bitwise_and(left, right, out=out, dtype=bool)
+        elif self.op == '|':
+            np.bitwise_or(left, right, out=out, dtype=bool)
+        else:
+            # Unknown op -> all False
+            out[:] = False
 
 
 class UnaryFilter(Filter):
@@ -351,9 +381,21 @@ class UnaryFilter(Filter):
         super().__init__(inputs=[input_filter], window_length=input_filter.window_length)
         
     def compute(self, today, assets, out, in_filter):
-        """Apply the unary operation to input."""
+        """Apply the unary operation to input, producing strict boolean mask."""
+        arr = np.asarray(in_filter)
+        if arr.dtype == object:
+            arr = np.array([bool(x) for x in arr.ravel()], dtype=bool)
+        else:
+            arr = arr.astype(bool, copy=False).ravel()
+        if arr.shape[0] != len(assets):
+            if arr.shape[0] == 1:
+                arr = np.full(len(assets), bool(arr[0]), dtype=bool)
+            else:
+                arr = np.zeros(len(assets), dtype=bool)
         if self.op == '~':
-            out[:] = ~in_filter
+            np.logical_not(arr, out=out)
+        else:
+            out[:] = False
 
 
 class Classifier(Term):

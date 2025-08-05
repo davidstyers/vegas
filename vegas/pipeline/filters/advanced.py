@@ -3,7 +3,7 @@
 This module defines more complex filters like All, Any, and AtLeastN.
 """
 import numpy as np
-from vegas.pipeline.terms import Filter
+from vegas.pipeline.terms import Filter, Term
 
 
 class All(Filter):
@@ -163,4 +163,60 @@ class NotMissing(Filter):
         if data.ndim > 1:
             out[:] = ~np.isnan(data[-1])
         else:
-            out[:] = ~np.isnan(data) 
+            out[:] = ~np.isnan(data)
+
+
+class TopN(Filter):
+    """
+    A Filter selecting the top N assets by a factor's value on the most recent row.
+    
+    Parameters
+    ----------
+    term : Term
+        Factor-like term providing numeric values.
+    n : int
+        Number of assets to select.
+    ascending : bool
+        If True, select smallest values; if False, select largest values.
+    """
+    def __init__(self, term: Term, n: int, ascending: bool = False, mask: Filter | None = None):
+        if n < 1:
+            raise ValueError(f"TopN requires n>=1, got {n}")
+        self.term = term
+        self.n = int(n)
+        self.ascending = bool(ascending)
+        # Respect provided mask or term.mask by threading it into the Filter base via self.mask
+        super().__init__(inputs=[term], window_length=term.window_length, mask=mask or getattr(term, 'mask', None))
+    
+    def compute(self, today, assets, out, data):
+        """
+        Produce a boolean mask for top N selection on the most recent row.
+        """
+        # Extract the last row
+        row = data[-1] if getattr(data, "ndim", 1) > 1 else data
+
+        # Start with all False
+        out[:] = False
+
+        # Build candidate mask: finite values only
+        finite = np.isfinite(row)
+
+        # Apply term-level mask if present (must match length)
+        if self.mask is not None and hasattr(self.mask, 'latest_mask_values'):
+            # If engine supports computing mask separately, we'd pass it; since not available here,
+            # fall back to finite only. Engine-side will already filter by screen separately.
+            pass  # No-op: engine applies screen; intra-filter mask not computed here.
+
+        idx = np.where(finite)[0]
+        if idx.size == 0:
+            return
+
+        values = row[idx]
+
+        # Determine order for selection
+        order = np.argsort(values)  # ascending
+        if not self.ascending:
+            order = order[::-1]
+
+        take = idx[order[: min(self.n, idx.size)]]
+        out[take] = True

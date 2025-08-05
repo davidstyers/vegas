@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 import polars as pl
 import matplotlib.pyplot as plt
+from tabulate import tabulate
 
 from vegas.engine import BacktestEngine
 from vegas.strategy import Strategy
@@ -111,7 +112,7 @@ def run_backtest(args):
             initial_capital=args.capital
         )
         # Print results
-        print_results(results, strategy_class.__name__)
+        print_results(results, strategy_class.__name__, logger)
         
         # Generate outputs if requested
         generate_outputs(results, strategy_class.__name__, args)
@@ -141,22 +142,21 @@ def load_data(engine, args, logger):
         raise
 
 
-def print_results(results, strategy_name):
+def print_results(results, strategy_name, logger):
     """Print backtest results to the console."""
     stats = results['stats']
-    print("\nBacktest Results:")
-    print(f"Strategy: {strategy_name}")
-    print(f"Total Return: {stats.get('total_return_pct', 0.0):.2f}%")
-    
-    # Print additional stats if available
-    if 'sharpe_ratio' in stats:
-        print(f"Sharpe Ratio: {stats['sharpe_ratio']:.2f}")
-    
-    if 'max_drawdown' in stats:
-        print(f"Max Drawdown: {stats['max_drawdown']:.2f}%")
-    
-    print(f"Number of Trades: {stats.get('num_trades', 0)}")
-    print(f"Execution Time: {results['execution_time']:.2f} seconds")
+    rows = [[k, v] for k, v in results['stats'].items()]
+    logger.info(
+        f"\n\n{strategy_name} Backtest Results:\n" + 
+        tabulate(
+            rows,
+            headers=["Statistic", "Value"],
+            tablefmt="rounded_grid",
+            colalign=("center", "right"),
+            floatfmt=",.2f",
+            ) + 
+        f"\n\nExecution Time: {results['execution_time']:.2f} seconds"
+        ) 
 
 
 def generate_outputs(results, strategy_name, args):
@@ -532,10 +532,10 @@ def db_query(args):
             else:
                 # Print to console (with limit)
                 max_rows = args.limit if args.limit > 0 else len(result)
-                pd.set_option('display.max_rows', max_rows)
-                pd.set_option('display.max_columns', None)
-                pd.set_option('display.width', None)
-                print(result.head(max_rows))
+                pl.Config.set_tbl_rows(max_rows)     # limit the number of rows displayed
+                pl.Config.set_tbl_cols(None)         # show all columns (None = no limit)
+                pl.Config.set_tbl_width_chars(None)
+                print(result)
                 
                 if len(result) > max_rows:
                     print(f"\n(Showing {max_rows} of {len(result)} rows)")

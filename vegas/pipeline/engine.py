@@ -2,7 +2,7 @@
 
 This module defines the PipelineEngine class that computes pipelines.
 """
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Tuple
 import numpy as np
 import polars as pl
 from datetime import datetime, timedelta
@@ -89,89 +89,88 @@ class PipelineEngine:
     
     def _compute_pipeline_for_day(self, pipeline: Pipeline, day: datetime.date) -> pl.DataFrame:
         """
-        Compute a pipeline for a single day.
-        
-        Parameters
-        ----------
-        pipeline : Pipeline
-            The pipeline to compute
-        day : datetime
-            The day to compute the pipeline for
-            
-        Returns
-        -------
-        pl.DataFrame
-            A DataFrame containing the computed pipeline values for the day
+        Compute a pipeline for a single day using vectorized Polars windows.
+        Assumes inbound market data is already a Polars DataFrame.
         """
         try:
-            # Get data for the day and any lookback window
+            # Determine lookback bounds from maximum window across the pipeline
             max_window = self._get_max_window_length(pipeline)
             trading_days = self.data_layer.get_all_trading_days()
-            lookback_start = (
-                trading_days.filter(trading_days <= day)[-max_window:][0]
-                if trading_days.filter(trading_days <= day).len() >= max_window
-                else None
-            )
+            eligible = trading_days.filter(trading_days <= day)
+            lookback_start = eligible[-max_window:][0] if eligible.len() >= max_window else None
 
             prev_days = trading_days.filter(trading_days < day)
             prev_day = prev_days[-1] if prev_days.len() > 0 else None
-            
-            # Get market data for the computation
+
+            # Retrieve market data for the lookback window
             market_data = self.data_layer.get_data_for_backtest(lookback_start, day)
-            
             if market_data.is_empty():
                 self.logger.warning(f"No market data found for {day}")
                 return pl.DataFrame()
-            
-            # Get the universe of assets for the previous day
-            assets = self.data_layer.get_universe(prev_day)
-            
-            if not assets or len(assets) == 0:
-                self.logger.warning(f"No assets found for {day}")
-                # Try to get assets from the market data as a fallback
+
+            # Resolve universe: prefer engine's universe from prev_day, fallback to market_data
+            uni = self.data_layer.get_universe(prev_day)
+            if not uni or len(uni) == 0:
                 if 'symbol' in market_data.columns:
-                    assets = market_data.select(pl.col('symbol').unique().sort()).to_series().to_list()
-                    if assets:
-                        self.logger.info(f"Using {len(assets)} assets from market data")
-                    else:
+                    assets_order = (
+                        market_data.filter(pl.col('timestamp') <= pl.lit(day))
+                        .select(pl.col('symbol').cast(pl.Utf8).unique())
+                        .to_series()
+                        .drop_nulls()
+                        .to_list()
+                    )
+                    assets_order = sorted([str(a) for a in assets_order])
+                    if not assets_order:
                         return pl.DataFrame()
+                    self.logger.info(f"Using {len(assets_order)} assets from market data")
                 else:
                     return pl.DataFrame()
-            
-            # Convert assets to strings to ensure consistency
-            assets = [str(asset) for asset in assets]
-            
+            else:
+                assets_order = sorted([str(a) for a in uni])
+
             # Compute each column
             col_names = list(pipeline.columns.keys())
             results_matrix: Dict[str, np.ndarray] = {}
             for name, term in pipeline.columns.items():
                 try:
-                    term_result = self._compute_term(term, day, assets, market_data)
+                    self.logger.info(f"Computing term {name} for {day}")
+                    term_result = self._compute_term(term, day, assets_order, market_data)
                     results_matrix[name] = term_result
                 except Exception as e:
                     self.logger.error(f"Error computing term {name}: {e}")
-                    results_matrix[name] = np.full(len(assets), np.nan)
-            
-            # Build polars DataFrame
+                    results_matrix[name] = np.full(len(assets_order), np.nan)
+
+            # Assemble result DataFrame
             data_dict: Dict[str, Any] = {name: results_matrix[name] for name in col_names}
-            data_dict['symbol'] = assets
+            data_dict['symbol'] = assets_order
             result_df = pl.DataFrame(data_dict)
-            
+
             # Apply screen if present
             if pipeline.screen is not None:
                 try:
-                    screen_result = self._compute_term(pipeline.screen, day, assets, market_data)
-                    mask = np.asarray(screen_result, dtype=bool)
-                    if mask.shape[0] != result_df.height:
-                        self.logger.error("Screen result length does not match result rows; skipping screen")
+                    # Compute screen and coerce to strict boolean mask with correct length.
+                    raw_mask = self._compute_term(pipeline.screen, day, assets_order, market_data)
+                    mask = np.asarray(raw_mask)
+                    # If object dtype leaked through Filters, convert elementwise to bool
+                    if mask.dtype == object:
+                        mask = np.array([bool(x) for x in mask.ravel()], dtype=bool)
                     else:
+                        mask = mask.astype(bool, copy=False).ravel()
+                    # Validate length and broadcast scalar if needed
+                    if mask.shape[0] != len(assets_order):
+                        if mask.shape[0] == 1:
+                            mask = np.full(len(assets_order), bool(mask[0]), dtype=bool)
+                        else:
+                            self.logger.error("Screen result length does not match result rows; skipping screen")
+                            mask = None
+                    if mask is not None:
                         result_df = result_df.with_columns(pl.Series('_screen_mask', mask))
                         result_df = result_df.filter(pl.col('_screen_mask')).drop('_screen_mask')
                 except Exception as e:
                     self.logger.error(f"Error applying screen: {e}")
-            
+
             return result_df
-        
+
         except Exception as e:
             self.logger.error(f"Error computing pipeline for {day}: {e}")
             return pl.DataFrame()
@@ -204,43 +203,27 @@ class PipelineEngine:
     
     def _compute_term(self, term: Term, day: datetime, assets: List[str], market_data: pl.DataFrame) -> np.ndarray:
         """
-        Compute a single term for the given day and assets.
-        
-        Parameters
-        ----------
-        term : Term
-            The term to compute
-        day : datetime
-            The day to compute the term for
-        assets : list of str
-            The assets to compute the term for
-        market_data : pl.DataFrame
-            The market data to use for computation
-            
-        Returns
-        -------
-        np.ndarray
-            An array of computed values
+        Compute a single term for the given day and assets using vectorized windows for raw inputs.
         """
-        # Create output array
+        # Ensure dtype is respected; Filters may request object dtype internally but engine expects arrays.
+        # Build output with the exact dtype requested by the term.
         out = np.full(len(assets), term.missing_value, dtype=term.dtype)
-        
-        # If term has inputs, compute those first
+
+        # Resolve inputs
         input_arrays: List[np.ndarray] = []
         if hasattr(term, 'inputs') and term.inputs:
             for input_term in term.inputs:
                 if isinstance(input_term, Term):
-                    input_result = self._compute_term(input_term, day, assets, market_data)
-                    input_arrays.append(input_result)
+                    input_arrays.append(self._compute_term(input_term, day, assets, market_data))
                 elif isinstance(input_term, str):
-                    # String inputs are column names in market_data
-                    window_data = self._get_window_data(market_data, input_term, day, term.window_length)
-                    if window_data is not None:
-                        input_arrays.append(window_data)
-                    else:
+                    wlen = getattr(term, 'window_length', 1) or 1
+                    arr = self._get_window_data(market_data, input_term, day, wlen, assets)
+                    if arr is None:
                         return np.full(len(assets), term.missing_value, dtype=term.dtype)
-        
-        # Call the term's compute method
+                    if arr.dtype != np.float64:
+                        arr = arr.astype(np.float64, copy=False)
+                    input_arrays.append(arr)
+
         try:
             term.compute(day, assets, out, *input_arrays)
             return out
@@ -248,80 +231,64 @@ class PipelineEngine:
             self.logger.error(f"Error computing term {term}: {e}")
             return np.full(len(assets), term.missing_value, dtype=term.dtype)
     
-    def _get_window_data(self, market_data: pl.DataFrame, column: str, day: datetime, window_length: int) -> Optional[np.ndarray]:
+    def _get_window_data(self, market_data: pl.DataFrame, column: str, day: datetime, window_length: int, assets_order: Optional[List[str]] = None) -> Optional[np.ndarray]:
         """
-        Get window_length days of data for a column up to and including day.
-        
-        Parameters
-        ----------
-        market_data : pl.DataFrame
-            The market data
-        column : str
-            The column to get data for
-        day : datetime
-            The last day to include
-        window_length : int
-            The number of days to include
-            
-        Returns
-        -------
-        np.ndarray or None
-            Array of shape (window_length, n_assets) or None if data not available
+        Vectorized window retrieval for a raw input column using a single Polars pivot.
+
+        Returns float64 ndarray of shape (window_length, n_assets) aligned to assets_order.
         """
         if column not in market_data.columns:
             self.logger.warning(f"Column '{column}' not found in market data")
             return None
-        
-        if 'timestamp' not in market_data.columns:
-            self.logger.warning("Column 'timestamp' not found in market data")
+        if 'timestamp' not in market_data.columns or 'symbol' not in market_data.columns:
+            self.logger.warning("Required columns 'timestamp' or 'symbol' not found in market data")
             return None
-        if 'symbol' not in market_data.columns:
-            self.logger.warning("Column 'symbol' not found in market data")
-            return None
-        
-        md = market_data
-        # Ensure timestamp is datetime for comparison
-        ts_dtype = md.schema.get('timestamp')
-        if ts_dtype == pl.Utf8:
-            md = md.with_columns(pl.col('timestamp').str.strptime(pl.Datetime, strict=False))
-        elif ts_dtype == pl.Date:
-            md = md.with_columns(pl.col('timestamp').cast(pl.Datetime))
-        
-        filtered = md.filter(pl.col('timestamp') <= pl.lit(day))
-        
-        if filtered.is_empty():
-            return None
-        
-        # Determine consistent symbol ordering
-        symbols = (
-            filtered.select(pl.col('symbol').unique())
-            .to_series()
-            .to_list()
+
+        # Derive deterministic assets order if not provided
+        if not assets_order:
+            symbols = (
+                market_data.filter(pl.col('timestamp') <= pl.lit(day))
+                .select(pl.col('symbol').cast(pl.Utf8).unique())
+                .to_series()
+                .drop_nulls()
+                .to_list()
+            )
+            assets_order = sorted([str(s) for s in symbols])
+
+        # Filter and pivot
+        fdf = market_data.filter(
+            (pl.col('timestamp') <= pl.lit(day)) & (pl.col('symbol').is_in(assets_order))
         )
-        symbols = sorted([str(s) for s in symbols if s is not None])
-        
-        if not symbols:
-            return None
-        
-        per_symbol_arrays: Dict[str, np.ndarray] = {}
-        
-        for sym in symbols:
-            sdf = filtered.filter(pl.col('symbol') == sym).sort('timestamp')
-            if sdf.is_empty():
-                per_symbol_arrays[sym] = np.full(window_length, np.nan, dtype=float)
-                continue
-            vals = sdf.select(pl.col(column)).to_series().to_numpy()
-            if vals.shape[0] >= window_length:
-                arr = vals[-window_length:]
-            else:
-                pad = np.full(window_length - vals.shape[0], np.nan, dtype=float)
-                arr = np.concatenate([pad, vals.astype(float, copy=False)])
-            per_symbol_arrays[sym] = arr
-        
-        if not per_symbol_arrays:
-            return None
-        
-        mat = np.column_stack([per_symbol_arrays[s] for s in symbols]).astype(float, copy=False)
+        if fdf.is_empty():
+            return np.full((window_length, len(assets_order)), np.nan, dtype=np.float64)
+
+        fdf = fdf.select(
+            pl.col('timestamp').cast(pl.Datetime),
+            pl.col('symbol').cast(pl.Utf8),
+            pl.col(column).cast(pl.Float64),
+        ).sort(['timestamp', 'symbol'])
+
+        pivot = fdf.pivot(index='timestamp', columns='symbol', values=column, aggregate_function='first')
+
+        # Align pivot columns to assets_order
+        symbol_cols = [c for c in pivot.columns if c != 'timestamp']
+        missing = [s for s in assets_order if s not in symbol_cols]
+        if missing:
+            pivot = pivot.with_columns([pl.lit(None, dtype=pl.Float64).alias(s) for s in missing])
+        pivot = pivot.select(['timestamp'] + assets_order)
+
+        # Tail and convert
+        tail = pivot.tail(window_length)
+        mat = tail.select(assets_order).to_numpy()
+        if mat.dtype != np.float64:
+            mat = mat.astype(np.float64, copy=False)
+
+        # Top-pad if needed
+        if mat.shape[0] < window_length:
+            pad_rows = window_length - mat.shape[0]
+            pad = np.full((pad_rows, mat.shape[1]), np.nan, dtype=np.float64)
+            mat = np.vstack([pad, mat])
+
         return mat
 
     def _to_polars_df(self, df_any: Any) -> pl.DataFrame:

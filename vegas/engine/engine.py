@@ -6,7 +6,6 @@ This module provides a streamlined backtesting engine.
 from datetime import datetime, timedelta
 import logging
 import time
-from pandas import tseries
 import polars as pl
 
 from vegas.data import DataLayer
@@ -175,7 +174,23 @@ class BacktestEngine:
         context = self.strategy.context
         context.set_portfolio(self.portfolio)  # Ensure portfolio is accessible
         context.set_engine(self)  # Set reference to the engine for pipeline access
+
+        # Expose commission namespace for user convenience before initialize()
+        # so users can call: context.set_commission(commission.PerShare(...))
+        try:
+            from vegas.broker.commission import commission as _commission_ns
+            context.commission = _commission_ns
+        except Exception:
+            pass
+
+        # Allow strategy to configure commission in initialize
         self.strategy.initialize(context)
+
+        # After initialize, if a commission model was set, persist it on engine for reuse
+        try:
+            self._commission_model = context.get_commission_model()
+        except Exception:
+            self._commission_model = None
         
         start_time = time.time()
         
@@ -253,7 +268,7 @@ class BacktestEngine:
                             start_date=day_timestamp,
                             end_date=day_timestamp
                             )
-                        if not pipeline_result.empty:
+                        if pipeline_result.height > 0:
                             # Make results available via pipeline_output
                             self._pipeline_results[name] = pipeline_result
                             self._logger.debug(
@@ -318,7 +333,7 @@ class BacktestEngine:
             self._create_empty_results()
     
     def _create_transactions_from_signals(self, signals, market_data):
-        """Convert signals to transactions.
+        """Convert signals to transactions using the active commission model.
         
         Args:
             signals: List of Signal objects
@@ -336,6 +351,20 @@ class BacktestEngine:
         price_lookup = {}
         if not market_data.is_empty() and 'symbol' in market_data.columns and 'close' in market_data.columns:
             price_lookup = {row['symbol']: row['close'] for row in market_data.select(['symbol', 'close']).to_dicts()}
+
+        # Determine commission model from strategy context, or default to a minimal per-share model
+        commission_model = None
+        try:
+            commission_model = self.strategy.context.get_commission_model()
+        except Exception:
+            commission_model = None
+
+        if commission_model is None:
+            try:
+                from vegas.broker.commission import PerShareCommissionModel
+                commission_model = PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
+            except Exception:
+                commission_model = None
         
         for signal in signals:
             try:
@@ -359,9 +388,11 @@ class BacktestEngine:
                 # Convert action to quantity (positive for buy, negative for sell)
                 if action.lower() == 'sell':
                     quantity = -abs(quantity)
-                    
-                # Add a simplified commission
-                commission = abs(quantity * price * 0.001)  # 0.1% commission
+                
+                # Commission via selected model (if any)
+                commission = 0.0
+                if commission_model is not None:
+                    commission = float(commission_model.calculate_commission(price, quantity))
                 
                 transactions.append({
                     'symbol': symbol,
