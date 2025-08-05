@@ -1,13 +1,13 @@
 """Data Layer for the Vegas backtesting engine.
 
 This module provides functionality for ingesting and querying historical market data
-using pandas and numpy for efficient vectorized operations.
+using polars and numpy for efficient vectorized operations.
 """
 
 from typing import Dict, List, Optional, Union, Set
 from datetime import datetime, timedelta
 import os
-import pandas as pd
+import polars as pl
 import numpy as np
 import glob
 import zstandard as zstd
@@ -22,15 +22,15 @@ from vegas.database import DatabaseManager
 
 
 class DataLayer:
-    """Minimal, vectorized data layer for the Vegas backtesting engine."""
+    """Data layer for the Vegas backtesting engine."""
     
-    def __init__(self, data_dir: str = "db", test_mode: bool = False, timezone: str = "UTC"):
+    def __init__(self, data_dir: str = "db", test_mode: bool = False, timezone: str = "EST"):
         """Initialize the DataLayer.
         
         Args:
             data_dir: Directory for storing data files
             test_mode: If True, uses an isolated in-memory database for testing
-            timezone: Timezone for timestamp conversion (default: 'UTC')
+            timezone: Timezone for timestamp conversion (default: 'EST')
         """
         self.data_dir = data_dir
         self.logger = logging.getLogger('vegas.data')
@@ -43,8 +43,8 @@ class DataLayer:
         try:
             pytz.timezone(timezone)
         except pytz.exceptions.UnknownTimeZoneError:
-            self.logger.warning(f"Unknown timezone: {timezone}, falling back to UTC")
-            self.timezone = "UTC"
+            self.logger.warning(f"Unknown timezone: {timezone}, falling back to EST")
+            self.timezone = "EST"
             
         self.logger.info(f"DataLayer initialized with timezone: {self.timezone}")
         
@@ -91,7 +91,7 @@ class DataLayer:
             except Exception as e:
                 self.logger.warning(f"Failed to clean up test directory {self.parquet_dir}: {e}")
     
-    def _convert_timestamp_timezone(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _convert_timestamp_timezone(self, df: pl.DataFrame) -> pl.DataFrame:
         """Convert dataframe timestamps to the configured timezone.
         
         Args:
@@ -100,45 +100,22 @@ class DataLayer:
         Returns:
             DataFrame with timestamps converted to the configured timezone
         """
-        if df is None or df.empty or 'timestamp' not in df.columns:
+        if df is None or df.is_empty() or 'timestamp' not in df.columns:
             return df
             
-        # Make a copy to avoid modifying the original
-        df = df.copy()
-        
-        # Make sure timestamps are datetime objects
-        if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # If timestamps don't have timezone info, assume UTC
-        if df['timestamp'].dt.tz is None:
-            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-            
-        # Convert to target timezone - handle both pytz and datetime.timezone objects
-        # Check if current timezone matches target timezone without accessing .zone attribute
-        current_tz_str = str(df['timestamp'].dt.tz)
-        target_tz_str = self.timezone
-        
-        if current_tz_str != target_tz_str:
-            # Convert to the target timezone
-            try:
-                df['timestamp'] = df['timestamp'].dt.tz_convert(self.timezone)
-            except Exception as e:
-                self.logger.warning(f"Failed to convert timestamp timezone: {e}, keeping original timezone")
-            
-        return df
+        return df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=self.timezone)))
     
     def is_initialized(self) -> bool:
         """Check if the data layer is initialized with data."""
         # Check if in-memory data is available
-        if self.data is not None and not self.data.empty:
+        if self.data is not None and not self.data.is_empty():
             return True
             
         # Check if database data is available
         if self.use_database and self.db_manager:
             try:
                 dates = self.db_manager.get_available_dates()
-                return not dates.empty and dates['day_count'].iloc[0] > 0
+                return not dates.is_empty() and dates.row(0)[dates.columns.index('day_count')] > 0
             except Exception as e:
                 self.logger.warning(f"Database query failed: {e}")
                 
@@ -165,14 +142,14 @@ class DataLayer:
         if self.use_database and self.db_manager:
             try:
                 dates = self.db_manager.get_available_dates()
-                if not dates.empty and dates['day_count'].iloc[0] > 0:
+                if not dates.is_empty() and dates.select(pl.col('day_count')).item() > 0:
                     self.logger.info("Using data from database")
                     # Load a sample to initialize the data layer
                     data = self.db_manager.get_market_data(
-                        start_date=dates['start_date'].iloc[0],
-                        end_date=dates['start_date'].iloc[0] + pd.Timedelta(days=1)
+                        start_date=dates.select('start_date').item(),
+                        end_date=dates.select('start_date').item() + timedelta(days=1)
                     )
-                    if not data.empty:
+                    if not data.is_empty():
                         self._validate_and_process_data(data)
                         return
             except Exception as e:
@@ -207,18 +184,18 @@ class DataLayer:
             except Exception as e:
                 self.logger.error(f"Failed to ingest data into database: {e}")
     
-    def _read_file(self, file_path: str) -> pd.DataFrame:
+    def _read_file(self, file_path: str) -> pl.DataFrame:
         """Read file and return DataFrame."""
         if file_path.endswith('.zst'):
             # Decompress Zstandard file
             with open(file_path, 'rb') as f:
                 dctx = zstd.ZstdDecompressor()
                 data_buffer = dctx.decompress(f.read())
-                csv_data = io.StringIO(data_buffer.decode('utf-8'))
-                df = pd.read_csv(csv_data, parse_dates=['timestamp'])
+                csv_data = io.BytesIO(data_buffer)
+                df = pl.read_csv(csv_data, try_parse_dates=True)
         else:
             # Regular CSV file
-            df = pd.read_csv(file_path, parse_dates=['timestamp'])
+            df = pl.scan_csv(file_path, try_parse_dates=True)
             
         # Convert timestamps to the configured timezone
         return self._convert_timestamp_timezone(df)
@@ -274,7 +251,7 @@ class DataLayer:
             raise ValueError("No valid data files were loaded")
             
         # Combine all dataframes
-        combined_df = pd.concat(dfs, ignore_index=True)
+        combined_df = pl.concat(dfs)
         self._validate_and_process_data(combined_df)
     
     def _find_files(self, directory: str, file_pattern: str) -> List[str]:
@@ -293,10 +270,10 @@ class DataLayer:
                     
         return files
     
-    def _validate_and_process_data(self, df: pd.DataFrame) -> None:
+    def _validate_and_process_data(self, df: pl.DataFrame) -> None:
         """Validate and process loaded data."""
         # Check if dataframe is empty
-        if df.empty:
+        if df.is_empty():
             raise ValueError("Data is empty")
             
         # Check required columns
@@ -306,11 +283,11 @@ class DataLayer:
             raise ValueError(f"Required columns missing: {missing_cols}")
             
         # Sort by timestamp
-        df = df.sort_values('timestamp')
+        df = df.sort('timestamp')
         
         # Ensure timestamp is a datetime with proper timezone
-        if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df.schema['timestamp'].dtype != pl.Datetime:
+            df = df.with_columns(pl.col('timestamp').cast(pl.Datetime))
             
         # Apply timezone conversion
         df = self._convert_timestamp_timezone(df)
@@ -319,12 +296,12 @@ class DataLayer:
         self.data = df
         
         # Update derived properties
-        self.symbols = set(df['symbol'].unique())
-        self.date_range = (df['timestamp'].min(), df['timestamp'].max())
+        self.symbols = set(df.select('symbol').unique().to_series().to_list())
+        self.date_range = (df.select('timestamp').min().item(), df.select('timestamp').max().item())
         
         self.logger.info(f"Processed {len(df)} rows with {len(self.symbols)} symbols")
     
-    def get_data_for_backtest(self, start: datetime, end: datetime, symbols: List[str] = None) -> pd.DataFrame:
+    def get_data_for_backtest(self, start: datetime, end: datetime, symbols: List[str] = None, market_hours: tuple = None) -> pl.DataFrame:
         """Get data for a backtest period.
         
         Args:
@@ -336,82 +313,59 @@ class DataLayer:
             DataFrame with market data
         """
         # Ensure start and end are timezone-aware
-        start_ts = pd.Timestamp(start)
-        end_ts = pd.Timestamp(end)
-        
-        # Localize to the configured timezone if they don't have timezone info
-        if start_ts.tz is None:
-            start_ts = start_ts.tz_localize(self.timezone)
-        if end_ts.tz is None:
-            end_ts = end_ts.tz_localize(self.timezone)
+        start_ts = start
+        end_ts = end
+
+        def _time_str_to_minutes(time_str: str) -> int:
+            hour, minute = map(int, time_str.split(":"))
+            return hour * 60 + minute
         
         # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
-                data = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols)
-                if not data.empty:
-                    # Apply timezone conversion
-                    return self._convert_timestamp_timezone(data)
-            except Exception as e:
-                self.logger.warning(f"Failed to get data from database: {e}")
-        
-        # Fall back to in-memory data if available
-        if self.data is not None:
-            # Make sure timestamps have timezone info
-            data_with_tz = self.data.copy()
-            data_timestamps = data_with_tz['timestamp']
-            
-            if data_timestamps.dt.tz is None:
-                # Localize to UTC first then convert
-                data_with_tz['timestamp'] = data_timestamps.dt.tz_localize('UTC')
-                try:
-                    data_with_tz['timestamp'] = data_with_tz['timestamp'].dt.tz_convert(self.timezone)
-                except Exception as e:
-                    self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-            else:
-                # Compare string representations instead of .zone attribute
-                current_tz_str = str(data_timestamps.dt.tz)
-                target_tz_str = str(self.timezone)
-                if current_tz_str != target_tz_str:
-                    try:
-                        data_with_tz['timestamp'] = data_with_tz['timestamp'].dt.tz_convert(self.timezone)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-                
-            # Filter by date range
-            filtered_data = data_with_tz[
-                (data_with_tz['timestamp'] >= start_ts) & 
-                (data_with_tz['timestamp'] <= end_ts)
-            ]
-            
-            # Filter by symbols if provided
-            if symbols:
-                filtered_data = filtered_data[filtered_data['symbol'].isin(symbols)]
-                
-            return filtered_data
+                self.data = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols, timezone=self.timezone)
+                if not self.data.is_empty():
+                    if market_hours:
+                        start = _time_str_to_minutes(market_hours[0])
+                        end = _time_str_to_minutes(market_hours[1])
+                        return self.data.filter(
+                            (pl.col("timestamp").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp").dt.minute().cast(pl.Int32)).is_between(start, end, closed="left")
+                        )
+                    else:
+                        return self.data
+            finally:
+                self.logger.info("Data loaded from database")
             
         # No data available
-        return pd.DataFrame()
+        return pl.DataFrame()
     
-    def get_unique_dates(self) -> pd.DatetimeIndex:
+    def get_unique_dates(self) -> List[datetime]:
         """Get unique dates in the dataset."""
         if self.data is None:
             if self.use_database and self.db_manager:
                 try:
                     dates = self.db_manager.get_available_dates()
-                    if not dates.empty:
-                        return pd.DatetimeIndex(pd.date_range(
-                            start=dates['start_date'].iloc[0],
-                            end=dates['end_date'].iloc[0]
-                        ))
+                    if not dates.is_empty():
+                        start_date = dates.select(pl.col('start_date')).item()
+                        end_date = dates.select(pl.col('end_date')).item()
+                        delta = (end_date - start_date).days + 1
+                        return [(start_date + timedelta(days=i)).date() for i in range(delta)]
                 except Exception:
                     pass
-            return pd.DatetimeIndex([])
+            return []
+    
+    def get_all_trading_days(self) -> List[datetime]:
+        """Get all trading days in the dataset."""
+        if self.use_database and self.db_manager:
+            return self.db_manager.get_available_trading_days()
+        return []
             
         # Get unique dates from timestamp column
-        return pd.DatetimeIndex(self.data['timestamp'].dt.floor('D').unique())
+        return self.data.select(
+            pl.col('timestamp').dt.date().alias('date')
+        ).unique().sort('date').get_column('date').to_list()
     
-    def get_universe(self, date: datetime = None) -> List[str]:
+    def get_universe(self, date: datetime.date = None) -> List[str]:
         """Get the universe of available symbols.
         
         Args:
@@ -424,41 +378,42 @@ class DataLayer:
             return sorted(list(self.symbols)) if self.symbols else []
             
         # Filter data by date and return unique symbols
-        if self.data is not None and not self.data.empty:
+        if self.data is not None and not self.data.is_empty():
             try:
-                date_floor = pd.Timestamp(date).floor('D')
-                date_ceil = pd.Timestamp(date).floor('D') + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-                
-                filtered_data = self.data[
-                    (self.data['timestamp'] >= date_floor) & 
-                    (self.data['timestamp'] <= date_ceil)
-                ]
-                
-                if not filtered_data.empty:
-                    symbols = filtered_data['symbol'].unique()
-                    return sorted(list(symbols))
+                # Get the date portion only
+                date_floor = datetime.combine(date, datetime.min.time())
+                date_ceil = datetime.combine(date, datetime.max.time())
+                date_floor, date_ceil = date_floor.astimezone(pytz.timezone(self.timezone)), date_ceil.astimezone(pytz.timezone(self.timezone))
+
+                filtered_data = self.data.filter(
+                    (pl.col("timestamp") >= pl.lit(date_floor).cast(pl.Datetime("us", self.timezone))) &
+                    (pl.col("timestamp") <= pl.lit(date_ceil).cast(pl.Datetime("us", self.timezone)))
+                )
+                if not filtered_data.is_empty():
+                    symbols = filtered_data.select('symbol').unique().to_series().to_list()
+                    return symbols
                 else:
-                    self.logger.warning(f"No data available for date {date.date()}")
+                    self.logger.warning(f"No data available for date {date}")
                     # If no data for the specific date, try to get data from nearby dates
                     window_size = 5  # Look 5 days before and after
-                    expanded_start = date_floor - pd.Timedelta(days=window_size)
-                    expanded_end = date_ceil + pd.Timedelta(days=window_size)
+                    expanded_start = date_floor - timedelta(days=window_size)
+                    expanded_end = date_ceil + timedelta(days=window_size)
                     
-                    nearby_data = self.data[
-                        (self.data['timestamp'] >= expanded_start) & 
-                        (self.data['timestamp'] <= expanded_end)
-                    ]
+                    nearby_data = self.data.filter(
+                        (pl.col('timestamp') >= expanded_start) & 
+                        (pl.col('timestamp') <= expanded_end)
+                    )
                     
-                    if not nearby_data.empty:
-                        self.logger.info(f"Using symbols from nearby dates for {date.date()}")
-                        symbols = nearby_data['symbol'].unique()
-                        return sorted(list(symbols))
+                    if not nearby_data.is_empty():
+                        self.logger.info(f"Using symbols from nearby dates for {date}")
+                        symbols = nearby_data.select('symbol').unique().to_series().to_list()
+                        return symbols
             except Exception as e:
                 self.logger.error(f"Error getting universe for date {date}: {e}")
         
         # If we get here, we couldn't find any symbols for the date
         self.logger.warning(f"Falling back to all known symbols for date {date}")
-        return sorted(list(self.symbols)) if self.symbols else []
+        return list(self.symbols) if self.symbols else []
     
     def get_available_date_range(self) -> tuple:
         """Get the available date range in the dataset."""
@@ -469,14 +424,14 @@ class DataLayer:
         if self.use_database and self.db_manager:
             try:
                 dates = self.db_manager.get_available_dates()
-                if not dates.empty:
-                    return (dates['start_date'].iloc[0], dates['end_date'].iloc[0])
+                if not dates.is_empty():
+                    return (dates.select('start_date').item(), dates.select('end_date').item())
             except Exception:
                 pass
                 
         # Use data if available
-        if self.data is not None and not self.data.empty:
-            return (self.data['timestamp'].min(), self.data['timestamp'].max())
+        if self.data is not None and not self.data.is_empty():
+            return (self.data.select(pl.col('timestamp').min()).item(), self.data.select(pl.col('timestamp').max()).item())
             
         return (None, None)
     
@@ -484,16 +439,16 @@ class DataLayer:
         """Get information about loaded data."""
         start_date, end_date = self.get_available_date_range()
         
-        # if start_date is None or end_date is None:
-        #     return {
-        #         "symbol_count": 0,
-        #         "start_date": None,
-        #         "end_date": None,
-        #         "days": 0
-        #     }
+        if start_date is None or end_date is None:
+            return {
+                "symbol_count": 0,
+                "start_date": None,
+                "end_date": None,
+                "days": 0
+            }
             
         # Calculate days
-        if isinstance(start_date, pd.Timestamp) and isinstance(end_date, pd.Timestamp):
+        if isinstance(start_date, datetime) and isinstance(end_date, datetime):
             days = (end_date - start_date).days + 1
         else:
             days = 0
@@ -518,7 +473,7 @@ class DataLayer:
             "days": days
         }
     
-    def ingest_to_database(self, df: pd.DataFrame, source_name: str) -> int:
+    def ingest_to_database(self, df: pl.DataFrame, source_name: str) -> int:
         """Ingest data to the database."""
         if not self.use_database or self.db_manager is None:
             self.logger.warning("Database not available for ingestion")
@@ -573,7 +528,7 @@ class DataLayer:
             except Exception as e:
                 self.logger.error(f"Error closing database connection: {e}")
     
-    def get_data_for_timestamp(self, timestamp: datetime) -> pd.DataFrame:
+    def get_data_for_timestamp(self, timestamp: datetime) -> pl.DataFrame:
         """Get market data for a specific timestamp.
         
         Args:
@@ -583,7 +538,7 @@ class DataLayer:
             DataFrame with market data for the timestamp
         """
         # Ensure timestamp is timezone-aware
-        ts = pd.Timestamp(timestamp)
+        ts = timestamp
         if ts.tz is None:
             ts = ts.tz_localize(self.timezone)
         elif str(ts.tz) != str(self.timezone):  # Compare string representations instead of .zone attribute
@@ -596,12 +551,12 @@ class DataLayer:
         if self.use_database and self.db_manager:
             try:
                 # Use a small window around the timestamp to ensure we get data
-                start_time = ts - pd.Timedelta(minutes=1)
-                end_time = ts + pd.Timedelta(minutes=1)
+                start_time = ts - timedelta(minutes=1)
+                end_time = ts + timedelta(minutes=1)
                 data = self.db_manager.get_market_data(start_date=start_time, end_date=end_time)
                 
                 # Filter to get closest timestamps
-                if not data.empty:
+                if not data.is_empty():
                     # Convert timestamps to the configured timezone
                     data = self._convert_timestamp_timezone(data)
                     
@@ -616,23 +571,30 @@ class DataLayer:
                         closest_data.append(closest_row)
                     
                     if closest_data:
-                        return pd.DataFrame(closest_data)
+                        return pl.DataFrame(closest_data) if closest_data else pl.DataFrame()
             except Exception as e:
                 self.logger.warning(f"Failed to get data from database for timestamp {ts}: {e}")
         
         # Fall back to in-memory data if available
         if self.data is not None:
             # Make sure timestamps have timezone info for comparison
-            data_copy = self.data.copy()
-            if data_copy['timestamp'].dt.tz is None:
-                data_copy['timestamp'] = data_copy['timestamp'].dt.tz_localize('UTC').dt.tz_convert(self.timezone)
+            data_copy = self.data.clone()
+            dtype = data_copy.schema['timestamp']
+            if isinstance(dtype, pl.datatypes.Datetime):
+                current_tz = dtype.tz
             else:
-                # Compare string representations instead of .zone attribute
-                current_tz_str = str(data_copy['timestamp'].dt.tz)
-                target_tz_str = str(self.timezone)
-                if current_tz_str != target_tz_str:
+                current_tz = None
+
+            if current_tz is None:
+                # Localize naive timestamps to UTC then convert
+                data_copy = data_copy.with_columns(
+                    pl.col('timestamp').cast(pl.Datetime('us', time_zone='UTC')).cast(pl.Datetime('us', time_zone=self.timezone)))
+            else:
+                 # If timezone differs, convert
+                if current_tz != self.timezone:
                     try:
-                        data_copy['timestamp'] = data_copy['timestamp'].dt.tz_convert(self.timezone)
+                        data_copy = data_copy.with_columns(
+                        pl.col('timestamp').cast(pl.Datetime('us', time_zone=self.timezone)))
                     except Exception as e:
                         self.logger.warning(f"Failed to convert timestamp timezone: {e}")
                 
@@ -646,71 +608,37 @@ class DataLayer:
             return result
             
         # No data available
-        return pd.DataFrame()
+        return pl.DataFrame()
     
-    def get_trading_days(self, start_date: datetime, end_date: datetime) -> pd.DatetimeIndex:
-        """Get all trading days in the specified date range.
-        
-        Args:
-            start_date: Start date
-            end_date: End date
-            
-        Returns:
-            DatetimeIndex with trading days
+    def get_trading_days(self, start_date: datetime, end_date: datetime) -> pl.Series:
+        """Return unique trading days (pl.Date) within [start_date, end_date] that have data.
         """
-        # Ensure dates are timezone-aware
-        start_ts = pd.Timestamp(start_date)
-        end_ts = pd.Timestamp(end_date)
-        
-        if start_ts.tz is None:
-            start_ts = start_ts.tz_localize(self.timezone)
-        if end_ts.tz is None:
-            end_ts = end_ts.tz_localize(self.timezone)
-            
-        # First try to get data from the current dataset
-        if self.data is not None:
-            # Make sure timestamps have timezone info
-            data_with_tz = self.data.copy()
-            data_timestamps = data_with_tz['timestamp']
-            
-            if data_timestamps.dt.tz is None:
-                # Localize to UTC first, then convert to target timezone
-                data_with_tz['timestamp'] = data_timestamps.dt.tz_localize('UTC')
-                try:
-                    data_with_tz['timestamp'] = data_with_tz['timestamp'].dt.tz_convert(self.timezone)
-                except Exception as e:
-                    self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-            else:
-                # Compare string representations instead of .zone attribute
-                current_tz_str = str(data_timestamps.dt.tz)
-                target_tz_str = str(self.timezone)
-                if current_tz_str != target_tz_str:
-                    try:
-                        data_with_tz['timestamp'] = data_timestamps.dt.tz_convert(self.timezone)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-                
-            # Filter by date range and extract unique dates
-            filtered_data = data_with_tz[
-                (data_with_tz['timestamp'] >= start_ts) & 
-                (data_with_tz['timestamp'] <= end_ts)
-            ]
-            
-            if not filtered_data.empty:
-                # Extract unique dates (just the date part, not time)
-                dates = pd.to_datetime(filtered_data['timestamp']).dt.floor('D').unique()
-                return pd.DatetimeIndex(dates)
-        
-        # If no data available, generate business days
-        # This is a fallback and may include non-trading days
-        try:
-            return pd.bdate_range(start=start_ts, end=end_ts, tz=self.timezone)
-        except Exception as e:
-            self.logger.warning(f"Failed to create business day range with timezone: {e}, falling back to UTC")
-            # Fall back to UTC if there's an issue with the timezone
-            return pd.bdate_range(start=start_ts.tz_convert('UTC'), end=end_ts.tz_convert('UTC'), tz='UTC')
+        # No data available
+        if self.data is None or self.data.is_empty():
+            return pl.Series("date", [], dtype=pl.Date)
+
+        # Normalize bounds to polars Datetime in configured timezone (eager literals)
+        start_ts = start_date.astimezone(pytz.timezone(self.timezone))
+        end_ts = end_date.astimezone(pytz.timezone(self.timezone))
+
+        filtered = self.data.filter(
+                (pl.col("timestamp") >= pl.lit(start_ts).cast(pl.Datetime("us", self.timezone))) &
+                (pl.col("timestamp") <= pl.lit(end_ts).cast(pl.Datetime("us", self.timezone)))
+            )
+
+        if filtered.is_empty():
+            return pl.Series("date", [], dtype=pl.Date)
+
+        # Extract unique dates and return as Series
+        dates_df = (
+            filtered
+            .select(pl.col("timestamp").dt.date().alias("date"))
+            .unique()
+            .sort("date")
+        )
+        return dates_df.get_column("date")
     
-    def get_data_for_date(self, date: datetime) -> pd.DataFrame:
+    def get_data_for_date(self, date: datetime) -> pl.DataFrame:
         """Get all market data for a specific date.
         
         Args:
@@ -719,7 +647,7 @@ class DataLayer:
         Returns:
             DataFrame with market data for the date
         """
-        date_floor = pd.Timestamp(date).floor('D')
-        date_ceil = date_floor + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        date_floor = datetime.combine(date.date(), datetime.min.time())
+        date_ceil = datetime.combine(date.date(), datetime.max.time())
         
         return self.get_data_for_backtest(date_floor, date_ceil)

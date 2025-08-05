@@ -12,8 +12,9 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-import pandas as pd
+import polars as pl
 import matplotlib.pyplot as plt
+from tabulate import tabulate
 
 from vegas.engine import BacktestEngine
 from vegas.strategy import Strategy
@@ -94,7 +95,7 @@ def run_backtest(args):
         
         # Get data info
         data_info = engine.data_layer.get_data_info()
-        #logger.info(f"Loaded {data_info['row_count']} data points for {data_info['symbol_count']} symbols")
+        logger.info(f"Database contains {data_info['symbol_count']} symbols for {data_info['days']} days")
         
         # Set up backtest dates
         start_date = args.start_date or data_info['start_date']
@@ -110,17 +111,15 @@ def run_backtest(args):
             strategy=strategy,
             initial_capital=args.capital
         )
-        
         # Print results
-        print_results(results, strategy_class.__name__)
+        print_results(results, strategy_class.__name__, logger)
         
         # Generate outputs if requested
         generate_outputs(results, strategy_class.__name__, args)
         
         return 0
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return 1
+    finally:
+        engine.data_layer.close()
 
 
 def load_data(engine, args, logger):
@@ -143,22 +142,21 @@ def load_data(engine, args, logger):
         raise
 
 
-def print_results(results, strategy_name):
+def print_results(results, strategy_name, logger):
     """Print backtest results to the console."""
     stats = results['stats']
-    print("\nBacktest Results:")
-    print(f"Strategy: {strategy_name}")
-    print(f"Total Return: {stats.get('total_return_pct', 0.0):.2f}%")
-    
-    # Print additional stats if available
-    if 'sharpe_ratio' in stats:
-        print(f"Sharpe Ratio: {stats['sharpe_ratio']:.2f}")
-    
-    if 'max_drawdown' in stats:
-        print(f"Max Drawdown: {stats['max_drawdown']:.2f}%")
-    
-    print(f"Number of Trades: {stats.get('num_trades', 0)}")
-    print(f"Execution Time: {results['execution_time']:.2f} seconds")
+    rows = [[k, v] for k, v in results['stats'].items()]
+    logger.info(
+        f"\n\n{strategy_name} Backtest Results:\n" + 
+        tabulate(
+            rows,
+            headers=["Statistic", "Value"],
+            tablefmt="rounded_grid",
+            colalign=("center", "right"),
+            floatfmt=",.2f",
+            ) + 
+        f"\n\nExecution Time: {results['execution_time']:.2f} seconds"
+        ) 
 
 
 def generate_outputs(results, strategy_name, args):
@@ -191,15 +189,22 @@ def generate_quantstats_report(results, strategy_name, report_path, benchmark, l
     """Generate a QuantStats performance report."""
     try:
         import quantstats as qs
+        import pandas as pd
         import os
         
         # Prepare returns series for QuantStats
         equity_curve = results['equity_curve']
-        returns = equity_curve.set_index('timestamp')['equity']
-        
         # Ensure the returns have a proper datetime index
-        returns = prepare_returns_for_quantstats(returns, logger)
-        
+        returns = prepare_returns_for_quantstats(equity_curve, logger)
+        pd_returns = (
+                returns
+                .with_columns(pl.col('date').cast(pl.Datetime))  # ensure datetime in Polars
+                .to_pandas()
+            )
+        pd_returns['date'] = pd.to_datetime(pd_returns['date'])  # ensure datetime in Pandas
+        pd_returns = pd_returns.set_index('date')
+        pd_returns = pd_returns['daily_return_pct']
+
         # Get benchmark data
         benchmark = benchmark or 'SPY'
         logger.info(f"Generating QuantStats report with benchmark {benchmark}...")
@@ -209,7 +214,7 @@ def generate_quantstats_report(results, strategy_name, report_path, benchmark, l
         
         try:
             # Generate the report
-            qs.reports.html(returns, benchmark=benchmark, output=report_path, 
+            qs.reports.html(pd_returns, benchmark=benchmark, output=report_path, 
                            title=f"{strategy_name} Performance Report")
             
             if os.path.exists(report_path):
@@ -234,27 +239,65 @@ def generate_quantstats_report(results, strategy_name, report_path, benchmark, l
     
     except ImportError:
         logger.error("QuantStats not installed. Install with: pip install quantstats")
-    except Exception as e:
-        logger.error(f"Error generating QuantStats report: {e}")
+    finally:
+        logger.info("QuantStats report generation complete")
 
 
-def prepare_returns_for_quantstats(returns, logger):
-    """Prepare returns data for QuantStats report generation."""
-    # If returns have a proper datetime index with daily frequency, return as-is
-    if len(returns) <= 1:
+def prepare_returns_for_quantstats(returns: pl.Series, logger):
+    """Prepare returns data for QuantStats report generation using Polars Series."""
+
+    if returns.height <= 1:
         return returns
-        
-    # Ensure the index is sorted
-    returns = returns.sort_index()
+
+    # Sort by timestamp column (assuming 'timestamp' is available)
+    # Polars Series does not have an index, so you must work with a DataFrame
+    # We'll assume 'returns' is a DataFrame with columns ['timestamp', 'return']
+    if not isinstance(returns, pl.DataFrame):
+        logger.error("Expected returns to be a Polars DataFrame with 'timestamp' and 'return' columns")
+        return returns
+
+    returns = returns.sort('timestamp')
+
+    timestamps = returns['timestamp']
+
+    # Check for duplicated timestamps
+    has_duplicates = timestamps.is_duplicated().any()
     
-    # If we have intraday data, resample to daily returns
-    if (returns.index.duplicated().any() or 
-        returns.index.to_series().diff().min() < pd.Timedelta(days=1)):
+    # Check if minimum diff < 1 day
+    time_diffs = timestamps.diff().drop_nulls()
+    min_diff = time_diffs.min()
+    one_day_ns = 24 * 60 * 60 * 1_000_000_000  # 1 day in nanoseconds
+    
+    if has_duplicates or (min_diff is not None and min_diff < one_day_ns):
         logger.info("Resampling intraday data to daily returns")
-        # Use last value of each day instead of calculating pct_change again
-        daily_returns = returns.resample('D').last().pct_change(fill_method=None).dropna()
-        if len(daily_returns) > 1:
-            return daily_returns
+
+        daily_returns = (
+            returns
+            .with_columns(pl.col("timestamp").dt.date().alias("date"))
+            .group_by("date")
+            .last()
+            .sort("date")
+            .with_columns([
+                # Calculate daily return in dollars
+                pl.col("equity").diff().alias("daily_return_dollars"),
+                # Calculate daily return as percentage
+                pl.col("equity").pct_change().alias("daily_return_pct")
+            ])
+            .select([
+                "timestamp",
+                "equity",
+                "cash",
+                "daily_return_dollars",
+                "daily_return_pct",
+                "date"
+            ])
+        )
+
+        daily_returns = daily_returns.filter(pl.col('daily_return_pct').is_not_null())
+
+        if daily_returns.height > 1:
+            # Return a Series with daily_return, optionally with 'date' column if needed
+            return daily_returns.select(['date', 'daily_return_pct'])
     
     return returns
 
@@ -489,10 +532,10 @@ def db_query(args):
             else:
                 # Print to console (with limit)
                 max_rows = args.limit if args.limit > 0 else len(result)
-                pd.set_option('display.max_rows', max_rows)
-                pd.set_option('display.max_columns', None)
-                pd.set_option('display.width', None)
-                print(result.head(max_rows))
+                pl.Config.set_tbl_rows(max_rows)     # limit the number of rows displayed
+                pl.Config.set_tbl_cols(None)         # show all columns (None = no limit)
+                pl.Config.set_tbl_width_chars(None)
+                print(result)
                 
                 if len(result) > max_rows:
                     print(f"\n(Showing {max_rows} of {len(result)} rows)")
@@ -556,7 +599,7 @@ def main():
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
     common_parser.add_argument('--db-dir', type=str, default='db', help='Database directory')
-    common_parser.add_argument('--timezone', type=str, default='UTC', help='Timezone for data (e.g., UTC, US/Eastern, Europe/London)')
+    common_parser.add_argument('--timezone', type=str, default='US/Eastern', help='Timezone for data (e.g., UTC, US/Eastern, Europe/London)')
     
     # Run command
     run_parser = subparsers.add_parser('run', parents=[common_parser], help='Run a backtest')
@@ -572,9 +615,9 @@ def main():
     run_parser.add_argument('--report', type=str, help='Generate QuantStats report')
     run_parser.add_argument('--benchmark', type=str, help='Benchmark symbol for report')
     # Add new trading hours options
-    run_parser.add_argument('--market', type=str, default="US", help='Market name (e.g., NYSE, NASDAQ)')
-    run_parser.add_argument('--market-open', type=str, default="09:30", help='Market open time (HH:MM) in 24h format')
-    run_parser.add_argument('--market-close', type=str, default="16:00", help='Market close time (HH:MM) in 24h format')
+    run_parser.add_argument('--market', type=str, help='Market name (e.g., NYSE, NASDAQ)')
+    run_parser.add_argument('--market-open', type=str, help='Market open time (HH:MM) in 24h format')
+    run_parser.add_argument('--market-close', type=str, help='Market close time (HH:MM) in 24h format')
     run_parser.add_argument('--regular-hours-only', action='store_true', help='Only use data from regular market hours')
     run_parser.set_defaults(func=run_backtest)
     

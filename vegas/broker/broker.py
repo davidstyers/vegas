@@ -12,7 +12,7 @@ import pandas as pd
 import uuid
 
 from vegas.broker.slippage import SlippageModel, FixedSlippageModel
-from vegas.broker.commission import CommissionModel, FixedCommissionModel
+from vegas.broker.commission import CommissionModel, FixedCommissionModel, PerShareCommissionModel
 from vegas.strategy import Signal
 
 
@@ -189,7 +189,8 @@ class Broker:
         
         # Default models
         self.slippage_model = slippage_model or FixedSlippageModel()
-        self.commission_model = commission_model or FixedCommissionModel()
+        # Default to zero-cost per-share if none provided; engine/strategy can override
+        self.commission_model: CommissionModel = commission_model or PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
     
     def place_order(self, signal: Signal) -> Order:
         """Place an order based on a signal.

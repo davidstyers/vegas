@@ -1,6 +1,7 @@
 """Database management layer for the Vegas backtesting engine.
 
 This module provides functionality for managing market data using DuckDB and Parquet files.
+Optimized to use polars for high-performance data operations.
 """
 
 import os
@@ -10,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 from datetime import datetime
-import pandas as pd
+import polars as pl
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -36,7 +37,7 @@ class ParquetManager:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(os.path.join(self.data_dir, "partitioned"), exist_ok=True)
     
-    def write_dataframe_to_parquet(self, df: pd.DataFrame, file_path: str) -> str:
+    def write_dataframe_to_parquet(self, df: pl.DataFrame, file_path: str) -> str:
         """Write a DataFrame to a Parquet file.
         
         Args:
@@ -51,14 +52,13 @@ class ParquetManager:
         if directory:
             os.makedirs(directory, exist_ok=True)
         
-        # Convert to PyArrow Table and write to Parquet
-        table = pa.Table.from_pandas(df)
-        pq.write_table(table, file_path, compression="snappy")
+        # Write polars DataFrame to Parquet
+        df.write_parquet(file_path, compression="snappy")
         
         self.logger.info(f"Wrote {len(df)} rows to {file_path}")
         return file_path
     
-    def write_data_partitioned(self, df: pd.DataFrame, partition_cols: List[str]) -> List[str]:
+    def write_data_partitioned(self, df: pl.DataFrame, partition_cols: List[str]) -> List[str]:
         """Write data partitioned by specified columns.
         
         Args:
@@ -68,7 +68,7 @@ class ParquetManager:
         Returns:
             List of paths to written files
         """
-        if df.empty:
+        if df.is_empty():
             self.logger.warning("Empty DataFrame provided, nothing to write")
             return []
         
@@ -84,7 +84,7 @@ class ParquetManager:
         # Calculate potential partitions
         potential_partitions = 1
         for col in partition_cols:
-            unique_values = df[col].nunique()
+            unique_values = df.select(pl.col(col).n_unique()).item()
             potential_partitions *= unique_values
             
         if potential_partitions > MAX_PARTITIONS:
@@ -95,7 +95,7 @@ class ParquetManager:
             reduced_cols = partition_cols.copy()
             while potential_partitions > MAX_PARTITIONS and len(reduced_cols) > 1:
                 removed_col = reduced_cols.pop()
-                potential_partitions //= df[removed_col].nunique() or 1
+                potential_partitions //= df.select(pl.col(removed_col).n_unique()).item() or 1
                 self.logger.warning(f"Removed '{removed_col}' from partition columns to reduce partitions to {potential_partitions}")
             
             partition_cols = reduced_cols
@@ -126,7 +126,7 @@ class ParquetManager:
         self.logger.info(f"Wrote {len(df)} rows to {len(parquet_files)} partition files")
         return parquet_files
     
-    def read_parquet_file(self, file_path: str) -> pd.DataFrame:
+    def read_parquet_file(self, file_path: str) -> pl.DataFrame:
         """Read a Parquet file into a DataFrame.
         
         Args:
@@ -138,13 +138,12 @@ class ParquetManager:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Parquet file not found: {file_path}")
         
-        table = pq.read_table(file_path)
-        df = table.to_pandas()
+        df = pl.read_parquet(file_path)
         
         self.logger.info(f"Read {len(df)} rows from {file_path}")
         return df
     
-    def read_partitioned_dataset(self, base_dir: str = None, filters=None) -> pd.DataFrame:
+    def read_partitioned_dataset(self, base_dir: str = None, filters=None) -> pl.DataFrame:
         """Read a partitioned dataset with optional filters.
         
         Args:
@@ -164,14 +163,11 @@ class ParquetManager:
         parquet_files = glob.glob(os.path.join(base_dir, "**", "*.parquet"), recursive=True)
         if not parquet_files:
             self.logger.warning(f"No Parquet files found in {base_dir}")
-            return pd.DataFrame()
+            return pl.DataFrame()
         
         try:
-            # Use schema unification to handle different schemas across files
-            # Use standard PyArrow parameters for dataset creation
-            dataset = pq.ParquetDataset(base_dir, filters=filters)
-            table = dataset.read()
-            df = table.to_pandas()
+            # Use polars to read the partitioned dataset
+            df = pl.read_parquet(base_dir, use_pyarrow_dataset=True)
             
             # Process partition columns - extract from path if they don't exist in the data
             for col in ['year', 'month']:
@@ -216,7 +212,9 @@ class ParquetManager:
                 self.logger.info("Attempting fallback with DuckDB for reading partitioned dataset")
                 conn = duckdb.connect(":memory:")
                 conn.execute("INSTALL parquet; LOAD parquet;")
-                df = conn.execute(f"SELECT * FROM parquet_scan('{base_dir}/**/*.parquet', UNION_BY_NAME=TRUE)").fetchdf()
+                # Convert the DuckDB result to a polars DataFrame
+                pandas_df = conn.execute(f"SELECT * FROM parquet_scan('{base_dir}/**/*.parquet', UNION_BY_NAME=TRUE)").fetchdf()
+                df = pl.from_pandas(pandas_df)
                 conn.close()
                 self.logger.info(f"Successfully read {len(df)} rows using DuckDB fallback")
                 return df
@@ -278,6 +276,9 @@ class DatabaseManager:
             # Configure Parquet reading
             self.conn.execute("PRAGMA enable_object_cache;")
             self.conn.execute("SET enable_progress_bar=false;")
+
+            # Configure threads
+            self.conn.execute(f"PRAGMA threads={os.cpu_count()}")
             
             # Initialize database schema
             self._initialize_schema()
@@ -454,24 +455,34 @@ class DatabaseManager:
             self.logger.error(f"Query execution failed: {e}\nQuery: {query}")
             raise
     
-    def query_to_df(self, query: str, parameters: tuple = ()) -> pd.DataFrame:
+    def query_to_df(self, query: str, parameters: tuple = (), timezone: str = None) -> pl.DataFrame:
         """Execute a SQL query and return results as a DataFrame.
         
         Args:
             query: SQL query to execute
             parameters: Optional tuple of parameters for the query
+            timezone: Optional timezone to apply to timestamp columns
             
         Returns:
             DataFrame with query results
         """
         try:
             result = self.execute_query(query, parameters)
-            return result.fetchdf()
+            # Convert the DuckDB result to a polars DataFrame
+            df = result.pl()
+
+            # Apply timezone to timestamp column if requested and it exists
+            if timezone and 'timestamp' in df.columns:
+                # Check if timestamp column is a datetime
+                if df.schema["timestamp"] == pl.Datetime:
+                    df = df.with_columns(pl.col('timestamp').cast(pl.Datetime('us', time_zone=timezone)))
+                    self.logger.debug(f"Applied timezone {timezone} to timestamp column")
+            return df
         except Exception as e:
             self.logger.error(f"Failed to convert query results to DataFrame: {e}")
-            return pd.DataFrame()
+            return pl.DataFrame()
     
-    def ingest_data(self, df: pd.DataFrame, source_name: str) -> int:
+    def ingest_data(self, df: pl.DataFrame, source_name: str) -> int:
         """Ingest market data into the database.
         
         Args:
@@ -481,7 +492,7 @@ class DatabaseManager:
         Returns:
             Number of rows ingested
         """
-        if df.empty:
+        if df.is_empty():
             self.logger.warning(f"Empty DataFrame provided for source {source_name}, nothing to ingest")
             return 0
         
@@ -492,20 +503,25 @@ class DatabaseManager:
         
         try:
             # Ensure timestamp is a datetime with consistent timezone handling
-            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            if df.schema['timestamp'].dtype != pl.Datetime:
+                df = df.with_columns(pl.col('timestamp').cast(pl.Datetime))
                 
             # Normalize timestamps - convert to timezone-naive UTC for consistency
-            if hasattr(df['timestamp'].dt, 'tz') and df['timestamp'].dt.tz is not None:
+            timestamp_dtype = df.schema['timestamp'].dtype
+            if timestamp_dtype.has_time_zone():
                 # Convert to UTC and remove timezone info
-                df['timestamp'] = df['timestamp'].dt.tz_convert('UTC').dt.tz_localize(None)
+                df = df.with_columns(
+                    pl.col('timestamp').dt.convert_time_zone('UTC').dt.cast(pl.Datetime)
+                )
             else:
                 # Assume UTC if no timezone info is present
                 self.logger.info("Timestamp data has no timezone info, assuming UTC")
-                
+            
             # Add year and month columns for partitioning
-            df['year'] = df['timestamp'].dt.year
-            df['month'] = df['timestamp'].dt.month
+            df = df.with_columns([
+                pl.col('timestamp').dt.year().alias('year'),
+                pl.col('timestamp').dt.month().alias('month')
+            ])
             
             # Add partition path
             source_path = f"ingested/{source_name.replace('.', '_')}"
@@ -516,8 +532,8 @@ class DatabaseManager:
             self.parquet_manager.write_data_partitioned(df, partition_cols)
             
             # Record the data source
-            min_date = df['timestamp'].min()
-            max_date = df['timestamp'].max()
+            min_date = df.select(pl.col('timestamp').min()).item()
+            max_date = df.select(pl.col('timestamp').max()).item()
             
             # Insert or update data source record
             self.conn.execute("""
@@ -526,7 +542,7 @@ class DatabaseManager:
             """, (source_name, source_path, len(df), min_date, max_date))
             
             # Insert symbols if they don't exist
-            symbols = df['symbol'].unique()
+            symbols = df.select('symbol').unique().to_series().to_list()
             for symbol in symbols:
                 self.conn.execute("""
                 INSERT INTO symbols (symbol) VALUES (?)
@@ -602,7 +618,7 @@ class DatabaseManager:
                 text_stream = io.TextIOWrapper(stream_reader, encoding="utf-8")
                 
                 # Load CSV data
-                df = pd.read_csv(text_stream)
+                df = pl.read_csv(text_stream)
                 
                 # Validate required columns
                 required_columns = ['ts_event', 'symbol', 'open', 'high', 'low', 'close', 'volume']
@@ -611,10 +627,10 @@ class DatabaseManager:
                     raise ValueError(f"Missing required columns in OHLCV file: {missing_columns}")
                 
                 # Rename ts_event to timestamp for consistency
-                df = df.rename(columns={'ts_event': 'timestamp'})
+                df = df.rename({'ts_event': 'timestamp'})
                 
                 # Ensure timestamp is datetime
-                df['timestamp'] = pd.to_datetime(df["timestamp"], utc=True)
+                df = df.with_columns(pl.col('timestamp').cast(pl.Datetime).dt.replace_time_zone('UTC'))
                 
                 # Ingest the data
                 row_count = self.ingest_data(df, source_name)
@@ -726,7 +742,35 @@ class DatabaseManager:
                         f"{total_rows} total rows ingested")
         return total_rows
     
-    def get_available_dates(self) -> pd.DataFrame:
+    def get_available_trading_days(self) -> pl.Series:
+        """Return all UTC trading days that have any data across the entire database.
+        
+        Definition:
+          - Trading day is any unique UTC calendar date for which at least one row exists
+            in the market_data view for any symbol.
+        
+        Returns:
+          pl.Series of dtype pl.Date sorted ascending, empty if no data.
+        """
+        try:
+            df = self.query_to_df(
+                """
+                SELECT DISTINCT CAST(DATE_TRUNC('day', timestamp) AS DATE) AS date
+                FROM market_data
+                ORDER BY date
+                """
+            )
+            if df.is_empty() or "date" not in df.columns:
+                return pl.Series("date", [], dtype=pl.Date)
+            # Ensure dtype is pl.Date
+            if df.schema["date"] != pl.Date:
+                df = df.with_columns(pl.col("date").cast(pl.Date))
+            return df.get_column("date")
+        except Exception as e:
+            self.logger.error(f"Failed to get available trading days: {e}")
+            return pl.Series("date", [], dtype=pl.Date)
+    
+    def get_available_dates(self) -> pl.DataFrame:
         """Get the date range and day count available in the database.
         
         Returns:
@@ -742,15 +786,15 @@ class DatabaseManager:
             """)
             
             # Handle case where no data is available
-            if result.empty or pd.isna(result['start_date'].iloc[0]):
-                return pd.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
+            if result.is_empty():
+                return pl.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
                 
             return result
         except Exception as e:
             self.logger.error(f"Failed to get available dates: {e}")
-            return pd.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
+            return pl.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
     
-    def get_available_symbols(self) -> pd.DataFrame:
+    def get_available_symbols(self) -> pl.DataFrame:
         """Get the symbols available in the database.
         
         Returns:
@@ -767,10 +811,10 @@ class DatabaseManager:
             """)
         except Exception as e:
             self.logger.error(f"Failed to get available symbols: {e}")
-            return pd.DataFrame(columns=['symbol', 'record_count'])
+            return pl.DataFrame(schema={'symbol': pl.Utf8, 'record_count': pl.Int64})
     
     def get_market_data(self, start_date: datetime = None, end_date: datetime = None, 
-                      symbols: List[str] = None) -> pd.DataFrame:
+                      symbols: List[str] = None, timezone: str = "UTC") -> pl.DataFrame:
         """Query market data from the database.
         
         Args:
@@ -812,19 +856,19 @@ class DatabaseManager:
                 
             query += " ORDER BY timestamp, symbol"
             
-            return self.query_to_df(query, tuple(params))
+            return self.query_to_df(query, tuple(params), timezone=timezone)
             
         except Exception as e:
             self.logger.error(f"Failed to get market data: {e}")
-            return pd.DataFrame()
+            return pl.DataFrame()
     
-    def get_data_sources(self) -> pd.DataFrame:
+    def get_data_sources(self) -> pl.DataFrame:
         """Get information about data sources in the database.
         
         Returns:
             DataFrame with data source information
         """
-        return self.query_to_df("SELECT * FROM data_sources ORDER BY added_date DESC")
+        return self.query_to_df("SELECT * FROM data_sources")
     
     def get_database_size(self) -> int:
         """Get the size of the database file in bytes.

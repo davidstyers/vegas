@@ -37,6 +37,17 @@ class Context:
         self._portfolio = None
         self._engine = None  # Reference to the BacktestEngine
         self.current_date = None
+
+        # Commission model configured by the strategy (defaults applied by engine/broker if not set)
+        self._commission_model = None
+
+        # Expose a commission helper namespace to strategies:
+        # usage: context.set_commission(commission.PerShare(...))
+        try:
+            from vegas.broker.commission import commission as _commission_ns  # lazy import
+            self.commission = _commission_ns
+        except Exception:
+            self.commission = None
     
     def set_portfolio(self, portfolio):
         """Set the portfolio reference (used internally).
@@ -53,6 +64,14 @@ class Context:
             engine: BacktestEngine object
         """
         self._engine = engine
+
+    def set_commission(self, commission_model) -> None:
+        """Set the commission model for this strategy instance."""
+        self._commission_model = commission_model
+
+    def get_commission_model(self):
+        """Return the configured commission model (or None if not set)."""
+        return self._commission_model
     
     @property
     def portfolio(self):

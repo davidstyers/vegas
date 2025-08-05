@@ -3,10 +3,10 @@
 This module provides a streamlined backtesting engine.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import time
-import pandas as pd
+import polars as pl
 
 from vegas.data import DataLayer
 from vegas.strategy import Strategy, Context, Signal
@@ -96,7 +96,7 @@ class BacktestEngine:
         if name not in self._pipeline_results:
             self._logger.warning(f"No pipeline named '{name}' has been attached or computed")
             # Return empty DataFrame instead of raising an error
-            return pd.DataFrame()
+            return pl.DataFrame()
         return self._pipeline_results[name]
         
     def _is_regular_market_hours(self, timestamp):
@@ -109,7 +109,7 @@ class BacktestEngine:
             True if timestamp is within regular market hours, False otherwise
         """
         # Convert timestamp to datetime with time component
-        dt = pd.Timestamp(timestamp)
+        dt = timestamp
         
         # Parse market hours
         open_hour, open_minute = map(int, self._market_open_time.split(':'))
@@ -174,15 +174,39 @@ class BacktestEngine:
         context = self.strategy.context
         context.set_portfolio(self.portfolio)  # Ensure portfolio is accessible
         context.set_engine(self)  # Set reference to the engine for pipeline access
+
+        # Expose commission namespace for user convenience before initialize()
+        # so users can call: context.set_commission(commission.PerShare(...))
+        try:
+            from vegas.broker.commission import commission as _commission_ns
+            context.commission = _commission_ns
+        except Exception:
+            pass
+
+        # Allow strategy to configure commission in initialize
         self.strategy.initialize(context)
+
+        # After initialize, if a commission model was set, persist it on engine for reuse
+        try:
+            self._commission_model = context.get_commission_model()
+        except Exception:
+            self._commission_model = None
         
         start_time = time.time()
         
         # Get data for the backtest period
         self._logger.info("Loading market data for backtest period")
-        market_data = self.data_layer.get_data_for_backtest(start, end)
         
-        if market_data.empty:
+        # Add market hours filtering at database level if requested
+        market_hours = None
+        if self._ignore_extended_hours:
+            market_hours = (self._market_open_time, self._market_close_time)
+        
+        symbols = context.__dict__.get('symbols')
+
+        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=symbols)
+        
+        if market_data.is_empty():
             self._logger.warning("No data available for the specified period")
             return self._create_empty_results()
         
@@ -213,26 +237,17 @@ class BacktestEngine:
             Dictionary with backtest results
         """
         try:
-            # Make sure we're working with a copy of the DataFrame to avoid SettingWithCopyWarning
-            market_data = market_data.copy()
-            
-            # Filter data to only include regular market hours if needed
-            if self._ignore_extended_hours and not market_data.empty:
-                original_count = len(market_data)
-                market_data = market_data[market_data['timestamp'].apply(self._is_regular_market_hours)]
-                filtered_count = len(market_data)
-                if filtered_count < original_count:
-                    self._logger.info(
-                        f"Filtered out {original_count - filtered_count} data points outside regular "
-                        f"market hours ({self._market_open_time} to {self._market_close_time})"
-                    )
-                    if filtered_count == 0:
-                        self._logger.warning("No data points remaining after filtering for market hours!")
-                        return self._create_empty_results()
+            # The filtering for regular trading hours is now done at database level
+            # We just need to check if we have any data
+            if market_data.is_empty() and self._ignore_extended_hours:
+                self._logger.warning("No data points found within regular market hours!")
+                return self._create_empty_results()
             
             # Group market data by trading day for daily processing
-            market_data['date'] = pd.to_datetime(market_data['timestamp']).dt.date
-            unique_dates = market_data['date'].unique()
+            market_data = market_data.with_columns(
+                pl.col('timestamp').dt.date().alias('date')
+            )
+            unique_dates = sorted(market_data.select('date').unique().to_series().to_list())
             self._logger.info(f"Processing {len(unique_dates)} trading days")
             
             # Process data day by day
@@ -241,8 +256,8 @@ class BacktestEngine:
                 self._pipeline_results = {}
                 
                 # Get data for the current day
-                daily_data = market_data[market_data['date'] == date]
-                day_timestamp = pd.Timestamp(date)
+                daily_data = market_data.filter(pl.col('date') == date)
+                day_timestamp = datetime.combine(date, datetime.min.time())
                 
                 # Compute any attached pipelines for this day
                 for name, pipeline in self.attached_pipelines.items():
@@ -252,8 +267,8 @@ class BacktestEngine:
                             pipeline, 
                             start_date=day_timestamp,
                             end_date=day_timestamp
-                        )
-                        if not pipeline_result.empty:
+                            )
+                        if pipeline_result.height > 0:
                             # Make results available via pipeline_output
                             self._pipeline_results[name] = pipeline_result
                             self._logger.debug(
@@ -261,55 +276,49 @@ class BacktestEngine:
                             )
                         else:
                             self._logger.warning(f"Pipeline '{name}' returned empty results for {date}")
-                    except Exception as e:
-                        self._logger.error(f"Error computing pipeline '{name}' for {date}: {e}")
+                    finally:
+                        pass
                 
                 # Call before_trading_start at the beginning of each day
                 if hasattr(self.strategy, 'before_trading_start'):
-                    # Find data for market open - use first data point within regular hours if filtering
-                    if self._ignore_extended_hours:
-                        # Use the first data point of regular trading hours
-                        regular_hours_data = daily_data[daily_data['timestamp'].apply(self._is_regular_market_hours)]
-                        if not regular_hours_data.empty:
-                            day_start_data = regular_hours_data.sort_values('timestamp').iloc[0:1]
-                        else:
-                            # Fallback to first data point of the day if no regular hours data
-                            day_start_data = daily_data.sort_values('timestamp').iloc[0:1]
-                    else:
-                        # Use first data point of the day (could be extended hours)
-                        day_start_data = daily_data.sort_values('timestamp').iloc[0:1]
+                    # Since we've already filtered at the database level,
+                    # we can just use the first data point of the day
+                    day_start_data = daily_data.sort('timestamp').head(1)
                         
                     self.strategy.before_trading_start(context, day_start_data)
                 
+                partitioned = daily_data.sort('timestamp').partition_by('timestamp', as_dict=True)
+                sorted_timestamps = sorted(partitioned.keys())
+                
                 # Process each timestamp chronologically
-                for timestamp, timestamp_data in daily_data.groupby('timestamp'):
+                for (ts,), ts_data in daily_data.group_by('timestamp', maintain_order=True):
                     # Update context with current timestamp
-                    context.current_date = pd.Timestamp(timestamp).date()
+                    context.current_date = ts.date() if hasattr(ts, 'date') else ts
                     
                     # Call handle_data for each timestamp to generate trading signals
                     if hasattr(self.strategy, 'handle_data'):
-                        signals = self.strategy.handle_data(context, timestamp_data)
+                        signals = self.strategy.handle_data(context, ts_data)
                         
                         if signals:
                             # Process signals and create transactions
-                            transactions = self._create_transactions_from_signals(signals, timestamp_data)
+                            transactions = self._create_transactions_from_signals(signals, ts_data)
                             
                             # Update portfolio with transactions
                             if len(transactions) > 0:
                                 self.portfolio.update_from_transactions(
-                                    timestamp, 
+                                    ts, 
                                     transactions,
-                                    timestamp_data
+                                    ts_data
                                 )
                     
                     # Update portfolio state for this timestamp even without transactions
-                    self.portfolio.update_from_transactions(timestamp, pd.DataFrame(), timestamp_data)
+                    self.portfolio.update_from_transactions(ts, pl.DataFrame(), ts_data)
                     
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close
-                    is_last_timestamp = timestamp == daily_data['timestamp'].max()
+                    is_last_timestamp = ts == daily_data.select(pl.col('timestamp').max()).item()
                     if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
-                        self.strategy.on_market_close(context, timestamp_data, self.portfolio)
+                        self.strategy.on_market_close(context, ts_data, self.portfolio)
             
             # Prepare results
             return {
@@ -320,12 +329,11 @@ class BacktestEngine:
                 'success': True
             }
             
-        except Exception as e:
-            self._logger.error(f"Error during backtest execution: {e}")
-            return self._create_empty_results()
+        finally:
+            self._create_empty_results()
     
     def _create_transactions_from_signals(self, signals, market_data):
-        """Convert signals to transactions.
+        """Convert signals to transactions using the active commission model.
         
         Args:
             signals: List of Signal objects
@@ -335,14 +343,28 @@ class BacktestEngine:
             DataFrame with transactions
         """
         if not signals:
-            return pd.DataFrame()
+            return pl.DataFrame()
             
         transactions = []
         
         # Create a lookup for current prices
         price_lookup = {}
-        if not market_data.empty and 'symbol' in market_data.columns and 'close' in market_data.columns:
-            price_lookup = market_data.set_index('symbol')['close'].to_dict()
+        if not market_data.is_empty() and 'symbol' in market_data.columns and 'close' in market_data.columns:
+            price_lookup = {row['symbol']: row['close'] for row in market_data.select(['symbol', 'close']).to_dicts()}
+
+        # Determine commission model from strategy context, or default to a minimal per-share model
+        commission_model = None
+        try:
+            commission_model = self.strategy.context.get_commission_model()
+        except Exception:
+            commission_model = None
+
+        if commission_model is None:
+            try:
+                from vegas.broker.commission import PerShareCommissionModel
+                commission_model = PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
+            except Exception:
+                commission_model = None
         
         for signal in signals:
             try:
@@ -366,9 +388,11 @@ class BacktestEngine:
                 # Convert action to quantity (positive for buy, negative for sell)
                 if action.lower() == 'sell':
                     quantity = -abs(quantity)
-                    
-                # Add a simplified commission
-                commission = abs(quantity * price * 0.001)  # 0.1% commission
+                
+                # Commission via selected model (if any)
+                commission = 0.0
+                if commission_model is not None:
+                    commission = float(commission_model.calculate_commission(price, quantity))
                 
                 transactions.append({
                     'symbol': symbol,
@@ -379,7 +403,7 @@ class BacktestEngine:
             except Exception as e:
                 self._logger.error(f"Error processing signal: {e}")
         
-        return pd.DataFrame(transactions) if transactions else pd.DataFrame()
+        return pl.DataFrame(transactions) if transactions else pl.DataFrame()
     
     def _create_empty_results(self):
         """Create empty results dictionary for when no data is available."""
@@ -389,9 +413,9 @@ class BacktestEngine:
                 'total_return_pct': 0.0,
                 'num_trades': 0
             },
-            'equity_curve': pd.DataFrame(columns=['timestamp', 'equity', 'cash']),
-            'transactions': pd.DataFrame(),
-            'positions': pd.DataFrame(),
+            'equity_curve': pl.DataFrame(schema={'timestamp': pl.Datetime, 'equity': pl.Float64, 'cash': pl.Float64}),
+            'transactions': pl.DataFrame(),
+            'positions': pl.DataFrame(),
             'execution_time': 0.0,
             'success': False
         } 
