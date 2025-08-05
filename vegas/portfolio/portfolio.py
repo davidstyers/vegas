@@ -38,6 +38,10 @@ class Portfolio:
         self.avg_price: Dict[str, float] = {}
         self.current_equity = initial_capital
 
+        # Whether this portfolio is seeded from a live broker snapshot.
+        # When set, initial_capital remains as a reference but not used to assert returns in live mode.
+        self._seeded_from_snapshot = False
+
         # Margin and buying power tracking
         self.short_margin_requirement: float = 0.0  # Total margin requirement for shorts
         self.buying_power: float = initial_capital  # Available to initiate long or short considering margin
@@ -51,6 +55,55 @@ class Portfolio:
         self._last_price: Dict[str, float] = {}
 
         self._logger = logging.getLogger('vegas.portfolio')
+
+    def set_account_snapshot(self, cash: float, positions_dict: Dict[str, Dict[str, float]]) -> None:
+        """
+        Seed the portfolio state from an external brokerage account snapshot.
+
+        positions_dict format:
+          {
+            "AAPL": {"quantity": 10.0, "avg_price": 180.0},
+            "MSFT": {"quantity": -5.0, "avg_price": 410.0},
+            ...
+          }
+
+        - Sets current_cash to the provided cash
+        - Sets positions and avg_price using the provided snapshot
+        - Recomputes equity using last-known prices (falls back to avg_price if no price yet)
+        - Marks portfolio as seeded from snapshot
+        """
+        try:
+            self.current_cash = float(cash)
+        except Exception:
+            self.current_cash = cash
+
+        self.positions = {}
+        self.avg_price = {}
+        self.position_values = {}
+        self.transaction_history = []
+        self.position_history = []
+        self.equity_history = []
+
+        # Load positions and average prices from snapshot
+        for sym, info in positions_dict.items():
+            qty = float(info.get("quantity", 0.0))
+            if abs(qty) < EPS:
+                continue
+            avg_px = float(info.get("avg_price", 0.0))
+            self.positions[sym] = qty
+            self.avg_price[sym] = abs(avg_px)
+
+        # With no market data at snapshot time, approximate equity by cash + sum(qty*avg_price)
+        total_position_value = 0.0
+        for sym, qty in self.positions.items():
+            px = float(self.avg_price.get(sym, 0.0))
+            total_position_value += qty * px
+
+        self.current_equity = self.current_cash + total_position_value
+        self._seeded_from_snapshot = True
+
+        # Record a synthetic equity snapshot with timestamp=epoch 0 to indicate seeding point will be recorded on first bar
+        # We avoid adding a timestamped equity row here to let engine add the first bar state.
 
     def _recompute_short_margin_and_buying_power(self):
         """Recompute short margin requirement and buying power using Reg T approximation.

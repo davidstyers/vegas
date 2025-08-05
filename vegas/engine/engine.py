@@ -176,7 +176,6 @@ class BacktestEngine:
         context.set_engine(self)  # Set reference to the engine for pipeline access
 
         # Expose commission namespace for user convenience before initialize()
-        # so users can call: context.set_commission(commission.PerShare(...))
         try:
             from vegas.broker.commission import commission as _commission_ns
             context.commission = _commission_ns
@@ -418,4 +417,184 @@ class BacktestEngine:
             'positions': pl.DataFrame(),
             'execution_time': 0.0,
             'success': False
-        } 
+        }
+
+    # --- Live mode entry point (guarded hooks, no change to default run path) ---
+
+    def run_live(self, start, end, strategy, feed=None, broker=None):
+        """
+        Run in a live-like loop using an optional MarketDataFeed and a BrokerAdapter-compatible object.
+        Notes:
+          - initial_capital is NOT used here; cash/positions are seeded from broker.get_account()/get_positions()
+          - When no feed is provided, this method delegates to run() for historical mode.
+        """
+        self._logger.info(f"Starting live mode from {start.date()} to {end.date()}")
+
+        # Initialize strategy and portfolio (no initial_capital assumption)
+        self.strategy = strategy
+        self.portfolio = Portfolio(initial_capital=0.0)  # placeholder, will be set by snapshot
+
+        context = self.strategy.context
+        context.set_portfolio(self.portfolio)
+        context.set_engine(self)
+        try:
+            setattr(context, "mode", "live")
+        except Exception:
+            pass
+
+        # Expose commission namespace for user convenience before initialize()
+        try:
+            from vegas.broker.commission import commission as _commission_ns
+            context.commission = _commission_ns
+        except Exception:
+            pass
+
+        # Strategy may set commission, etc.
+        self.strategy.initialize(context)
+
+        try:
+            self._commission_model = context.get_commission_model()
+        except Exception:
+            self._commission_model = None
+
+        # If we don't have a feed, fall back to the historical path to keep behavior unchanged
+        if feed is None:
+            self._logger.info("No feed provided to run_live; delegating to historical run()")
+            return self.run(start, end, strategy, initial_capital=100000.0)
+
+        # Load reference historical data for end-of-day boundary checks
+        market_hours = None
+        if self._ignore_extended_hours:
+            market_hours = (self._market_open_time, self._market_close_time)
+        symbols = context.__dict__.get('symbols')
+        reference_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=symbols)
+
+        # Seed portfolio from broker snapshot if provided
+        if broker is not None:
+            try:
+                acct = broker.get_account()  # expects {'cash': ..., ...}
+                positions = broker.get_positions()  # expects {sym: {'quantity': q, 'avg_price': p}}
+                cash = float(acct.get('cash', 0.0)) if isinstance(acct, dict) else 0.0
+                pos_dict = positions if isinstance(positions, dict) else {}
+                self.portfolio.set_account_snapshot(cash, pos_dict)
+            except Exception as e:
+                self._logger.warning(f"Failed to seed portfolio from broker snapshot: {e}")
+
+        # Start feed
+        try:
+            feed.start()
+        except Exception:
+            pass
+
+        # For simulated execution support
+        try:
+            from vegas.broker.adapters import SimulatedBrokerAdapter  # type: ignore
+        except Exception:
+            SimulatedBrokerAdapter = None  # type: ignore
+
+        start_time = time.time()
+
+        while True:
+            nxt = feed.next_bar()
+            if nxt is None:
+                break
+
+            ts, ts_data = nxt
+            if not isinstance(ts_data, pl.DataFrame):
+                try:
+                    ts_data = pl.from_pandas(ts_data)
+                except Exception:
+                    ts_data = pl.DataFrame()
+
+            # Update context current time
+            context.current_date = ts.date() if hasattr(ts, 'date') else ts
+
+            # Strategy handle_data
+            signals = None
+            if hasattr(self.strategy, 'handle_data'):
+                signals = self.strategy.handle_data(context, ts_data)
+
+            transactions_pl = pl.DataFrame()
+
+            if signals:
+                if broker is not None:
+                    # Place orders
+                    for sig in signals:
+                        try:
+                            broker.place_order(sig)
+                        except Exception as e:
+                            self._logger.error(f"broker.place_order error: {e}")
+
+                    # Simulated immediate execution path
+                    if SimulatedBrokerAdapter is not None and isinstance(broker, SimulatedBrokerAdapter):
+                        snapshot = {}
+                        if 'symbol' in ts_data.columns:
+                            for sym in ts_data.select('symbol').unique().to_series().to_list():
+                                snapshot[sym] = ts_data.filter(pl.col('symbol') == sym)
+                        try:
+                            fills = broker.simulate_execute(snapshot, ts)
+                        except Exception as e:
+                            self._logger.error(f"SimulatedBrokerAdapter.simulate_execute error: {e}")
+                            fills = []
+
+                        if fills:
+                            tx_rows = [{
+                                'symbol': getattr(tx, 'symbol', None),
+                                'quantity': getattr(tx, 'quantity', 0.0),
+                                'price': getattr(tx, 'price', 0.0),
+                                'commission': float(getattr(tx, 'commission', 0.0) or 0.0),
+                            } for tx in fills]
+                            transactions_pl = pl.DataFrame(tx_rows) if tx_rows else pl.DataFrame()
+                    else:
+                        # External broker: poll fills
+                        try:
+                            fills = broker.poll_fills(until=ts)
+                        except Exception as e:
+                            self._logger.error(f"broker.poll_fills error: {e}")
+                            fills = []
+                        if fills:
+                            tx_rows = []
+                            for tx in fills:
+                                if isinstance(tx, dict):
+                                    tx_rows.append({
+                                        'symbol': tx.get('symbol'),
+                                        'quantity': tx.get('quantity', 0.0),
+                                        'price': tx.get('price', 0.0),
+                                        'commission': float(tx.get('commission', 0.0) or 0.0),
+                                    })
+                            transactions_pl = pl.DataFrame(tx_rows) if tx_rows else pl.DataFrame()
+                else:
+                    # Fallback to local transaction creation
+                    transactions_pl = self._create_transactions_from_signals(signals, ts_data)
+
+            # Update portfolio on every bar
+            if len(transactions_pl) > 0:
+                self.portfolio.update_from_transactions(ts, transactions_pl, ts_data)
+            self.portfolio.update_from_transactions(ts, pl.DataFrame(), ts_data)
+
+            # on_market_close at last timestamp for the day (using reference_data to find day max)
+            try:
+                day = ts.date()
+                day_data = reference_data.filter(pl.col('timestamp').dt.date() == day)
+                is_last_timestamp = False
+                if not day_data.is_empty():
+                    day_max = day_data.select(pl.col('timestamp').max()).item()
+                    is_last_timestamp = ts == day_max
+                if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
+                    self.strategy.on_market_close(context, ts_data, self.portfolio)
+            except Exception:
+                pass
+
+        execution_time = time.time() - start_time
+        results_dict = {
+            'stats': self.portfolio.get_stats(),
+            'equity_curve': self.portfolio.get_equity_curve(),
+            'transactions': self.portfolio.get_transactions(),
+            'positions': self.portfolio.get_positions(),
+            'execution_time': execution_time,
+            'success': True
+        }
+
+        # Allow strategy to analyze results
+        self.strategy.analyze(context, results_dict)
+        return results_dict

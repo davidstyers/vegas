@@ -103,14 +103,24 @@ def run_backtest(args):
         
         logger.info(f"Running backtest from {start_date.date()} to {end_date.date()} in timezone {args.timezone}")
         
-        # Run backtest
+        # Run backtest or live depending on mode
         strategy = strategy_class()
-        results = engine.run(
-            start=start_date,
-            end=end_date,
-            strategy=strategy,
-            initial_capital=args.capital
-        )
+        if getattr(args, "mode", "backtest") == "live":
+            # Live mode plumbing only; no external adapters constructed here per scope.
+            results = engine.run_live(
+                start=start_date,
+                end=end_date,
+                strategy=strategy,
+                feed=None,
+                broker=None
+            )
+        else:
+            results = engine.run(
+                start=start_date,
+                end=end_date,
+                strategy=strategy,
+                initial_capital=args.capital
+            )
         # Print results
         print_results(results, strategy_class.__name__, logger)
         
@@ -619,6 +629,8 @@ def main():
     run_parser.add_argument('--market-open', type=str, help='Market open time (HH:MM) in 24h format')
     run_parser.add_argument('--market-close', type=str, help='Market close time (HH:MM) in 24h format')
     run_parser.add_argument('--regular-hours-only', action='store_true', help='Only use data from regular market hours')
+    # New mode flag (backtest by default). Live will route to engine.run_live but no external adapters are constructed.
+    run_parser.add_argument('--mode', type=str, choices=['backtest', 'live'], default='backtest', help='Execution mode')
     run_parser.set_defaults(func=run_backtest)
     
     # Ingest command
