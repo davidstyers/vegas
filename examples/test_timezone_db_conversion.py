@@ -90,13 +90,16 @@ def test_timezone_conversion():
         print("\nTimestamp timezone information:")
         
         if 'timestamp' in data_db.columns:
-            db_timezone = data_db.schema['timestamp'].dtype.time_zone
+            # Polars Datetime dtype is pl.Datetime(time_unit, time_zone)
+            ts_dtype_db = data_db.schema['timestamp']
+            db_timezone = getattr(ts_dtype_db, "time_zone", None)
             print(f"Database conversion timezone: {db_timezone}")
         else:
             print("No timestamp column found in database converted data")
         
         if 'timestamp' in data_post_convert.columns:
-            post_timezone = data_post_convert.schema['timestamp'].dtype.time_zone
+            ts_dtype_post = data_post_convert.schema['timestamp']
+            post_timezone = getattr(ts_dtype_post, "time_zone", None)
             print(f"Post-query conversion timezone: {post_timezone}")
         else:
             print("No timestamp column found in post-converted data")

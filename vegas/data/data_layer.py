@@ -17,6 +17,7 @@ from pathlib import Path
 import tempfile
 import shutil
 import pytz
+from collections import OrderedDict
 
 from vegas.database import DatabaseManager
 
@@ -72,12 +73,22 @@ class DataLayer:
         self.db_manager = None
         self.use_database = True
         
+        # ---- Cache configuration ----
+        self._cache_enabled = True
+        self._query_cache_max = 64
+        self._slice_cache_max = 16
+        self._query_cache: "OrderedDict[tuple, pl.DataFrame]" = OrderedDict()
+        # maps (date_iso, frozenset(symbols), market_hours_tuple, timezone) -> dict[datetime, pl.DataFrame]
+        self._slice_cache: "OrderedDict[tuple, Dict[datetime, pl.DataFrame]]" = OrderedDict()
+        # -----------------------------------
+        
         try:
             self.db_manager = DatabaseManager(self.db_path, self.parquet_dir)
             self.logger.info("Database initialized successfully")
         except Exception as e:
             self.logger.warning(f"Failed to initialize database: {e}")
             self.use_database = False
+        self.engine = None
     
     def __del__(self):
         """Clean up any temporary resources."""
@@ -104,6 +115,27 @@ class DataLayer:
             return df
             
         return df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=self.timezone)))
+
+    # ---- Cache helpers ----
+    def _make_query_key(self, start: datetime, end: datetime, symbols: Optional[List[str]], market_hours: Optional[tuple]) -> tuple:
+        syms = tuple(sorted(symbols)) if symbols else None
+        mh = tuple(market_hours) if market_hours else None
+        return (start.isoformat(), end.isoformat(), syms, mh, str(self.timezone))
+
+    def _lru_get(self, cache: OrderedDict, key):
+        if key in cache:
+            val = cache.pop(key)
+            cache[key] = val
+            return val
+        return None
+
+    def _lru_set(self, cache: OrderedDict, key, val, maxsize: int):
+        if key in cache:
+            cache.pop(key)
+        cache[key] = val
+        while len(cache) > maxsize:
+            cache.popitem(last=False)
+    # ------------------------
     
     def is_initialized(self) -> bool:
         """Check if the data layer is initialized with data."""
@@ -301,6 +333,38 @@ class DataLayer:
         
         self.logger.info(f"Processed {len(df)} rows with {len(self.symbols)} symbols")
     
+    def get_unified_timestamp_index(self, start_ts: datetime, end_ts: datetime) -> pl.Series:
+        """Return unique, sorted timestamps across all data sources within [start_ts, end_ts].
+
+        This delegates to the database manager which queries the canonical union view.
+        The returned series is timezone-aware in the configured timezone.
+        """
+        if not self.use_database or self.db_manager is None:
+            # Fallback: derive from in-memory data if present
+            if self.data is None or self.data.is_empty():
+                return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=self.timezone))
+            start_bound = start_ts
+            end_bound = end_ts
+            try:
+                filtered = self.data.filter(
+                    (pl.col("timestamp") >= pl.lit(start_bound).cast(pl.Datetime("us", self.timezone))) &
+                    (pl.col("timestamp") <= pl.lit(end_bound).cast(pl.Datetime("us", self.timezone)))
+                )
+            except Exception:
+                # Best-effort without explicit cast if schema already matches
+                filtered = self.data.filter((pl.col("timestamp") >= start_bound) & (pl.col("timestamp") <= end_bound))
+            if filtered.is_empty():
+                return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=self.timezone))
+            ts = filtered.select(pl.col("timestamp")).unique().sort("timestamp").get_column("timestamp")
+            # Ensure timezone
+            return ts.cast(pl.Datetime("us", time_zone=self.timezone))
+
+        try:
+            return self.db_manager.get_unified_timestamps(start_ts, end_ts, timezone=self.timezone)
+        except Exception as e:
+            self.logger.error(f"get_unified_timestamp_index failed: {e}")
+            return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=self.timezone))
+
     def get_data_for_backtest(self, start: datetime, end: datetime, symbols: List[str] = None, market_hours: tuple = None) -> pl.DataFrame:
         """Get data for a backtest period.
         
@@ -320,19 +384,31 @@ class DataLayer:
             hour, minute = map(int, time_str.split(":"))
             return hour * 60 + minute
         
+        # Try cache first
+        if self._cache_enabled:
+            qkey = self._make_query_key(start_ts, end_ts, symbols, market_hours)
+            cached = self._lru_get(self._query_cache, qkey)
+            if cached is not None:
+                self.data = cached
+                return cached
+
         # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
-                self.data = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols, timezone=self.timezone)
-                if not self.data.is_empty():
+                raw = self.db_manager.get_market_data(start_date=start_ts, end_date=end_ts, symbols=symbols, timezone=self.timezone)
+                if not raw.is_empty():
                     if market_hours:
-                        start = _time_str_to_minutes(market_hours[0])
-                        end = _time_str_to_minutes(market_hours[1])
-                        return self.data.filter(
-                            (pl.col("timestamp").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp").dt.minute().cast(pl.Int32)).is_between(start, end, closed="left")
+                        start_m = _time_str_to_minutes(market_hours[0])
+                        end_m = _time_str_to_minutes(market_hours[1])
+                        result = raw.filter(
+                            (pl.col("timestamp").dt.hour().cast(pl.Int32) * 60 + pl.col("timestamp").dt.minute().cast(pl.Int32)).is_between(start_m, end_m, closed="left")
                         )
                     else:
-                        return self.data
+                        result = raw
+                    self.data = result
+                    if self._cache_enabled:
+                        self._lru_set(self._query_cache, qkey, result, self._query_cache_max)
+                    return result
             finally:
                 self.logger.info("Data loaded from database")
             
@@ -359,11 +435,6 @@ class DataLayer:
         if self.use_database and self.db_manager:
             return self.db_manager.get_available_trading_days()
         return []
-            
-        # Get unique dates from timestamp column
-        return self.data.select(
-            pl.col('timestamp').dt.date().alias('date')
-        ).unique().sort('date').get_column('date').to_list()
     
     def get_universe(self, date: datetime.date = None) -> List[str]:
         """Get the universe of available symbols.
@@ -651,3 +722,99 @@ class DataLayer:
         date_ceil = datetime.combine(date.date(), datetime.max.time())
         
         return self.get_data_for_backtest(date_floor, date_ceil)
+
+    def history(self, assets: Union[str, List[str]], current_dt: datetime, fields: Union[str, List[str]], bar_count: int, frequency: str = '1h') -> pl.DataFrame:
+        """
+        Fetch a window of historical market data.
+
+        This method depends on the engine attribute being set on this DataLayer instance,
+        which provides access to the current simulation time via `self.engine.context.current_dt`.
+
+        Args:
+            assets: A single symbol string or a list of symbol strings.
+            fields: A single field string (e.g., 'price') or a list of field strings.
+            bar_count: The number of historical bars to retrieve.
+            frequency: The data frequency (e.g., '1h', '1d').
+
+        Returns:
+            A Polars DataFrame containing the requested historical data, indexed by datetime
+            with columns for each asset and field.
+        """
+
+        # 1. Normalize parameters
+        if isinstance(assets, str):
+            assets = [assets]
+        if isinstance(fields, str):
+            fields = [fields]
+        
+        # Handle 'price' as a common alias for 'close'
+        if 'price' in fields:
+            fields = ['close' if f == 'price' else f for f in fields]
+
+        # 2. Construct and execute the query
+        # We need to select the `bar_count` most recent bars for each asset before `current_dt`.
+        query_fields = sorted(list(set(fields + ['timestamp', 'symbol'])))
+        fields_str = ", ".join(f'"{f}"' for f in query_fields)
+        assets_str = ", ".join([f"'{s}'" for s in assets])
+
+        query = f"""
+        WITH ranked_data AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
+            FROM market_data
+            WHERE
+                symbol IN ({assets_str})
+                AND timestamp <= ?
+        )
+        SELECT {fields_str}
+        FROM ranked_data
+        WHERE rn <= ?
+        ORDER BY timestamp ASC, symbol
+        """
+        
+        params = (current_dt, bar_count)
+        self.logger.debug(f"Executing history query with params {params}")
+        
+        try:
+            df = self.db_manager.query_to_df(query, params)
+        except Exception as e:
+            self.logger.error(f"Failed to fetch history: {e}")
+            return pl.DataFrame()
+
+        if df.is_empty():
+            return pl.DataFrame()
+
+        # 3. Handle resampling if requested frequency is different
+        # Assuming native frequency is 1h based on ingestion methods.
+        native_frequency = '1h'
+        if frequency != native_frequency:
+            self.logger.info(f"Resampling data from '{native_frequency}' to '{frequency}'")
+            
+            agg_exprs = []
+            if 'open' in fields: agg_exprs.append(pl.col('open').first().alias('open'))
+            if 'high' in fields: agg_exprs.append(pl.col('high').max().alias('high'))
+            if 'low' in fields: agg_exprs.append(pl.col('low').min().alias('low'))
+            if 'close' in fields: agg_exprs.append(pl.col('close').last().alias('close'))
+            if 'volume' in fields: agg_exprs.append(pl.col('volume').sum().alias('volume'))
+
+            if not agg_exprs:
+                self.logger.warning(f"Resampling for fields {fields} is not defined, returning un-resampled data.")
+            else:
+                df = df.sort("timestamp").group_by_dynamic(
+                    "timestamp",
+                    every=frequency,
+                    by="symbol"
+                ).agg(agg_exprs)
+
+        # 4. Pivot to wide format as requested
+        if not df.is_empty():
+            try:
+                # This creates columns like 'close_AAPL', 'volume_AAPL'
+                pivot_values = [f for f in fields if f in df.columns]
+                if pivot_values:
+                    df = df.pivot(index='timestamp', columns='symbol', values=pivot_values)
+            except Exception as e:
+                self.logger.warning(f"Could not pivot data to wide format: {e}. Returning long format.")
+
+        return df

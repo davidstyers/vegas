@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from tabulate import tabulate
 
 from vegas.engine import BacktestEngine
+from vegas.calendars import get_calendar
 from vegas.strategy import Strategy
 from vegas.data import DataLayer
 
@@ -77,18 +78,14 @@ def run_backtest(args):
         # Initialize engine
         engine = BacktestEngine(timezone=args.timezone)
         
-        # Configure trading hours if provided
-        if hasattr(args, 'market') or hasattr(args, 'market_open') or hasattr(args, 'market_close'):
-            market = getattr(args, 'market', "US")
-            market_open = getattr(args, 'market_open', "09:30")
-            market_close = getattr(args, 'market_close', "16:00")
-            engine.set_trading_hours(market, market_open, market_close)
-            logger.info(f"Configured trading hours: {market_open} to {market_close} for {market} market")
-        
-        # Configure extended hours handling
-        if hasattr(args, 'regular_hours_only') and args.regular_hours_only:
-            engine.ignore_extended_hours(True)
-            logger.info("Extended hours data will be ignored")
+        # Configure simulation calendar (mandatory)
+        engine._calendar_name = args.calendar
+        try:
+            # Validate early
+            get_calendar(args.calendar)
+        except Exception as e:
+            logger.error(f"Invalid calendar '{args.calendar}': {e}")
+            return 1
         
         # Load data
         load_data(engine, args, logger)
@@ -126,6 +123,51 @@ def run_backtest(args):
         
         # Generate outputs if requested
         generate_outputs(results, strategy_class.__name__, args)
+        
+        # Dump positions ledger if requested (kept here per original placement)
+        if hasattr(args, 'dump_positions') and args.dump_positions is not None:
+            try:
+                df = engine.dump_positions_ledger()
+            except Exception as e:
+                logger.error(f"dump_positions_ledger failed: {e}")
+                df = pl.DataFrame()
+
+            # Prepare tabulate output with ISO timestamps
+            if isinstance(df, pl.DataFrame) and df.height > 0:
+                disp = df
+                if "pos_open_ts" in disp.columns:
+                    disp = disp.with_columns(pl.col("pos_open_ts").map_elements(lambda x: x.isoformat() if x is not None else "", return_dtype=pl.Utf8))
+                if "pos_close_ts" in disp.columns:
+                    disp = disp.with_columns(pl.col("pos_close_ts").map_elements(lambda x: x.isoformat() if x is not None else "", return_dtype=pl.Utf8))
+                headers = disp.columns
+                rows = [[row.get(col) for col in headers] for row in disp.to_dicts()]
+                table = tabulate(rows, headers=headers, tablefmt="fancy_grid", floatfmt=".4f")
+                print("\nPositions Ledger:\n" + table)
+            else:
+                print("\nPositions Ledger:\n(empty)")
+
+            # Determine CSV path behavior
+            path_arg = args.dump_positions
+            if path_arg == "__DEFAULT__":
+                csv_path = "./positions_ledger.csv"
+            elif isinstance(path_arg, str):
+                csv_path = path_arg
+            else:
+                csv_path = None
+
+            # Write CSV if a path was provided (explicitly or default sentinel)
+            if csv_path:
+                try:
+                    df_out = df.clone() if isinstance(df, pl.DataFrame) else pl.DataFrame()
+                    if isinstance(df_out, pl.DataFrame) and df_out.height > 0:
+                        if "pos_open_ts" in df_out.columns:
+                            df_out = df_out.with_columns(pl.col("pos_open_ts").cast(pl.Utf8))
+                        if "pos_close_ts" in df_out.columns:
+                            df_out = df_out.with_columns(pl.col("pos_close_ts").cast(pl.Utf8))
+                    df_out.write_csv(csv_path)
+                    logger.info(f"Positions ledger CSV written to {csv_path}")
+                except Exception as e:
+                    logger.error(f"Failed to write positions ledger CSV: {e}")
         
         return 0
     finally:
@@ -624,13 +666,19 @@ def main():
     run_parser.add_argument('--results-csv', type=str, help='Save results to CSV file')
     run_parser.add_argument('--report', type=str, help='Generate QuantStats report')
     run_parser.add_argument('--benchmark', type=str, help='Benchmark symbol for report')
-    # Add new trading hours options
-    run_parser.add_argument('--market', type=str, help='Market name (e.g., NYSE, NASDAQ)')
-    run_parser.add_argument('--market-open', type=str, help='Market open time (HH:MM) in 24h format')
-    run_parser.add_argument('--market-close', type=str, help='Market close time (HH:MM) in 24h format')
-    run_parser.add_argument('--regular-hours-only', action='store_true', help='Only use data from regular market hours')
+    # Simulation calendar (mandatory)
+    run_parser.add_argument('--calendar', type=str, default='24/7', help='Trading calendar name (e.g., NYSE, 24/7)')
     # New mode flag (backtest by default). Live will route to engine.run_live but no external adapters are constructed.
     run_parser.add_argument('--mode', type=str, choices=['backtest', 'live'], default='backtest', help='Execution mode')
+
+    # Positions dump flag: optional path argument; prints table in all cases
+    run_parser.add_argument(
+        '--dump-positions',
+        nargs='?',
+        const='__DEFAULT__',
+        help='Dump all positions (open and closed) at end of run. Optional path to write CSV'
+    )
+
     run_parser.set_defaults(func=run_backtest)
     
     # Ingest command

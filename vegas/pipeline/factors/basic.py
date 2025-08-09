@@ -73,9 +73,15 @@ class SimpleMovingAverage(CustomFactor):
             # Ensure data is the right shape
             if data.ndim == 1:
                 data = data.reshape(-1, 1)
-            
-            # Calculate mean along axis 0 (time)
-            out[:] = np.nanmean(data, axis=0)
+
+            # Guard against empty/NaN-only windows to avoid RuntimeWarnings
+            valid_counts = np.sum(~np.isnan(data), axis=0)
+            out[:] = np.nan  # default
+            has_data = valid_counts > 0
+            if np.any(has_data):
+                with np.errstate(invalid="ignore"):
+                    means = np.nanmean(data[:, has_data], axis=0)
+                out[has_data] = means
         except Exception as e:
             # If calculation fails, fill with NaN
             out[:] = np.nan
@@ -121,21 +127,27 @@ class ExponentialWeightedMovingAverage(CustomFactor):
             # Ensure data is the right shape
             if data.ndim == 1:
                 data = data.reshape(-1, 1)
-                
+
             # Create weights that exponentially decay based on the provided rate
-            # The weights array will have shape (window_length,)
             weights = np.power(self.decay_rate, np.arange(self.window_length - 1, -1, -1))
-            
+
             # Normalize weights to sum to 1
-            weights = weights / np.sum(weights)
-            
-            # Weighted average (handle NaNs by setting them to 0 and renormalizing weights)
-            weighted_data = data * weights.reshape(-1, 1)  # Broadcasting weights across assets
-            
-            # Handle NaNs by using nansum and rescaling weights
+            wsum = np.sum(weights)
+            if not np.isfinite(wsum) or wsum == 0:
+                out[:] = np.nan
+                return
+            weights = weights / wsum
+
+            # Weighted average (handle NaNs by masking and renormalizing weights)
             mask = ~np.isnan(data)
-            valid_weights = np.sum(weights.reshape(-1, 1) * mask, axis=0)  # Sum of weights for non-NaN values
-            out[:] = np.nansum(weighted_data, axis=0) / valid_weights
+            out[:] = np.nan
+            if mask.any():
+                # For each asset, compute the effective sum of weights over valid entries
+                eff_w = np.sum(weights.reshape(-1, 1) * mask, axis=0)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    num = np.nansum((data * weights.reshape(-1, 1)), axis=0)
+                    valid = eff_w > 0
+                    out[valid] = num[valid] / eff_w[valid]
         except Exception as e:
             # If calculation fails, fill with NaN
             out[:] = np.nan
@@ -218,9 +230,16 @@ class StandardDeviation(CustomFactor):
             # Ensure data is the right shape
             if data.ndim == 1:
                 data = data.reshape(-1, 1)
-            
-            # Calculate standard deviation along axis 0 (time)
-            out[:] = np.nanstd(data, axis=0)
+
+            # Guard degrees of freedom issues: default ddof=0 for population std
+            # Only compute for columns with at least 1 finite observation
+            valid_counts = np.sum(~np.isnan(data), axis=0)
+            out[:] = np.nan
+            has_enough = valid_counts > 0
+            if np.any(has_enough):
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    stds = np.nanstd(data[:, has_enough], axis=0, ddof=0)
+                out[has_enough] = stds
         except Exception as e:
             # If calculation fails, fill with NaN
-            out[:] = np.nan 
+            out[:] = np.nan

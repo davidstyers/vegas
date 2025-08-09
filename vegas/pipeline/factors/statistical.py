@@ -57,16 +57,17 @@ class ZScore(CustomFactor):
         else:
             row = data
             
-        # Calculate mean and standard deviation
-        mean = np.nanmean(row)
-        std = np.nanstd(row)
-        
-        # Handle edge cases - if std is 0 or all data is NaN
-        if std == 0 or np.isnan(std):
-            # If we can't compute meaningful Z-scores, output NaNs
+        # Calculate mean and standard deviation with guards to avoid empty-slice warnings
+        finite_mask = np.isfinite(row)
+        if not np.any(finite_mask):
+            out[:] = np.nan
+            return
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean = np.nanmean(row[finite_mask])
+            std = np.nanstd(row[finite_mask], ddof=0)
+        if not np.isfinite(std) or std == 0:
             out[:] = np.nan
         else:
-            # Calculate Z-scores
             out[:] = (row - mean) / std
 
 

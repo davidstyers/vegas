@@ -2,11 +2,12 @@
 
 This module provides slippage models for simulating price impact
 during order execution in the broker simulation layer.
+
+Polars-only implementation; pandas is not used.
 """
 
 from abc import ABC, abstractmethod
-import pandas as pd
-import numpy as np
+import polars as pl
 
 
 class SlippageModel(ABC):
@@ -16,20 +17,20 @@ class SlippageModel(ABC):
     """
     
     @abstractmethod
-    def apply_slippage(self, order_price: float, order_quantity: float, 
-                      market_data: pd.DataFrame, is_buy: bool) -> float:
+    def apply_slippage(self, order_price: float, order_quantity: float,
+                      market_data: pl.DataFrame, is_buy: bool) -> float:
         """Apply slippage to an order.
         
         Args:
             order_price: Intended execution price
             order_quantity: Order quantity
-            market_data: Current market data
+            market_data: Current market data (Polars DataFrame)
             is_buy: Whether the order is a buy (True) or sell (False)
             
         Returns:
             Adjusted execution price after slippage
         """
-        pass
+        raise NotImplementedError
 
 
 class FixedSlippageModel(SlippageModel):
@@ -47,22 +48,22 @@ class FixedSlippageModel(SlippageModel):
         self.slippage_pct = slippage_pct
     
     def apply_slippage(self, order_price: float, order_quantity: float,
-                      market_data: pd.DataFrame, is_buy: bool) -> float:
+                      market_data: pl.DataFrame, is_buy: bool) -> float:
         """Apply fixed percentage slippage to an order.
         
         Args:
             order_price: Intended execution price
             order_quantity: Order quantity
-            market_data: Current market data
+            market_data: Current market data (Polars DataFrame)
             is_buy: Whether the order is a buy (True) or sell (False)
             
         Returns:
             Adjusted execution price after slippage
         """
         # For buys: price increases, for sells: price decreases
-        direction = 1 if is_buy else -1
-        slippage_factor = 1 + (direction * self.slippage_pct)
-        return order_price * slippage_factor
+        direction = 1.0 if is_buy else -1.0
+        slippage_factor = 1.0 + (direction * float(self.slippage_pct))
+        return float(order_price) * slippage_factor
 
 
 class VolumeSlippageModel(SlippageModel):
@@ -80,29 +81,32 @@ class VolumeSlippageModel(SlippageModel):
         self.volume_impact = volume_impact
     
     def apply_slippage(self, order_price: float, order_quantity: float,
-                      market_data: pd.DataFrame, is_buy: bool) -> float:
+                      market_data: pl.DataFrame, is_buy: bool) -> float:
         """Apply volume-based slippage to an order.
         
         Args:
             order_price: Intended execution price
             order_quantity: Order quantity
-            market_data: Current market data
+            market_data: Current market data (Polars DataFrame)
             is_buy: Whether the order is a buy (True) or sell (False)
             
         Returns:
             Adjusted execution price after slippage
         """
-        # Get current volume from market data
-        volume = market_data['volume'].iloc[-1]
+        # Get current volume from market data (last row)
+        if market_data.is_empty() or 'volume' not in market_data.columns:
+            return float(order_price)
+        volume = float(market_data.item(-1, 'volume'))
         
         # Calculate volume ratio (order size / market volume)
-        volume_ratio = min(abs(order_quantity) / max(volume, 1), 1.0)
+        volume = max(volume, 1.0)
+        volume_ratio = min(abs(float(order_quantity)) / volume, 1.0)
         
         # Calculate price impact based on volume ratio and impact factor
-        impact = self.volume_impact * volume_ratio
+        impact = float(self.volume_impact) * volume_ratio
         
         # For buys: price increases, for sells: price decreases
-        direction = 1 if is_buy else -1
-        slippage_factor = 1 + (direction * impact)
+        direction = 1.0 if is_buy else -1.0
+        slippage_factor = 1.0 + (direction * impact)
         
-        return order_price * slippage_factor 
+        return float(order_price) * slippage_factor

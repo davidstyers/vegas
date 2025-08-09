@@ -3657,7 +3657,10 @@ cffi = {version = ">=1.11", markers = "platform_python_implementation == \"PyPy\
 [package.extras]
 cffi = ["cffi (>=1.11)"]
 
+[extras]
+ibkr = []
+
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "6fa96f5a4274dba36e457f89d756cbdf5f03a5f2ca3bc3c0bc8caa92c75d6050"
+content-hash = "e02931550fb93c53cd848f634548b9e565e28d14b173f09fa96bd5e10b321515"

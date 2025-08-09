@@ -861,6 +861,47 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Failed to get market data: {e}")
             return pl.DataFrame()
+
+    def get_unified_timestamps(self, start_date: datetime, end_date: datetime, timezone: str = "UTC") -> pl.Series:
+        """Return a unified, unique, sorted list of timestamps across all known data tables.
+
+        Currently, this queries the canonical `market_data` view which already
+        unions all ingested sources. If additional tables (trades, quotes, orderbook)
+        are introduced later, this method should be updated to UNION DISTINCT their
+        timestamps as well.
+
+        Args:
+            start_date: inclusive lower bound
+            end_date: inclusive upper bound
+            timezone: target timezone for the returned timestamps
+
+        Returns:
+            pl.Series of dtype pl.Datetime with timezone, sorted ascending, unique.
+        """
+        try:
+            df = self.query_to_df(
+                """
+                SELECT DISTINCT timestamp
+                FROM market_data
+                WHERE timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp
+                """,
+                (start_date, end_date),
+                timezone=timezone,
+            )
+            if df.is_empty() or "timestamp" not in df.columns:
+                return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=timezone))
+
+            # Ensure we have timezone on the column
+            ts_col = df.get_column("timestamp")
+            if ts_col.dtype != pl.Datetime or (hasattr(ts_col.dtype, "time_zone") and ts_col.dtype.time_zone != timezone):
+                df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=timezone)))
+
+            # Return as a Series unique & sorted (already sorted by query)
+            return df.get_column("timestamp")
+        except Exception as e:
+            self.logger.error(f"Failed to get unified timestamps: {e}")
+            return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=timezone))
     
     def get_data_sources(self) -> pl.DataFrame:
         """Get information about data sources in the database.
@@ -929,4 +970,5 @@ class DatabaseManager:
             return duplicates_removed
         except Exception as e:
             self.logger.error(f"Failed to clean up duplicate data: {e}")
-            return 0 
+            return 0
+    

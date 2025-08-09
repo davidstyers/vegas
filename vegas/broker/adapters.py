@@ -70,15 +70,10 @@ class SimulatedBrokerAdapter(BrokerAdapter):
         """
         Execute pending orders against the provided market snapshot using
         the underlying Broker.execute_orders and store fills locally.
+        
+        Polars-only: pass Polars DataFrames directly to the broker.
         """
-        # The underlying Broker.execute_orders expects pandas DataFrames per symbol.
-        # The engine will control conversion to its internal polars format when updating portfolio.
-        pd_market: Dict[str, Any] = {}
-        for sym, df in market_data.items():
-            # df is polars.DataFrame; convert to pandas lazily for broker compat
-            pd_market[sym] = df.to_pandas()
-
-        transactions = self._broker.execute_orders(pd_market, timestamp)  # returns list of Transaction dataclasses
+        transactions = self._broker.execute_orders(market_data, timestamp)
         if transactions:
             self._pending_fills.extend(transactions)
             if self._on_fill_cb is not None:

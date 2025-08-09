@@ -8,18 +8,35 @@ import logging
 import time
 import polars as pl
 
-from vegas.data import DataLayer
+from vegas.data import DataLayer, DataPortal
 from vegas.strategy import Strategy, Context, Signal
 from vegas.portfolio import Portfolio
+from vegas.broker import Broker
 from vegas.pipeline.engine import PipelineEngine
 
 
 class BacktestEngine:
-    """Efficient backtesting engine for the Vegas backtesting system.
+    """Backtesting engine for the Vegas backtesting system.
     
     This engine provides streamlined backtesting capabilities by directly
     processing market data chronologically without a separate events system.
     """
+
+    def dump_positions_ledger(self) -> pl.DataFrame:
+        """
+        Build and return the complete positions ledger (open and closed) as a Polars DataFrame.
+
+        Delegates to the portfolio to reconstruct positions from recorded events/transactions.
+        Returns an empty DataFrame if the portfolio is not initialized.
+        """
+        try:
+            if self.portfolio is None:
+                return pl.DataFrame()
+            # Portfolio provides latest price lookup internally when None
+            return self.portfolio.build_positions_ledger(latest_price_lookup=None)
+        except Exception:
+            # Fail-safe: never raise from dump; return empty DF to keep CLI resilient
+            return pl.DataFrame()
     
     def __init__(self, data_dir: str = "db", timezone: str = "UTC"):
         """Initialize the backtest engine.
@@ -32,8 +49,11 @@ class BacktestEngine:
         self._logger.info(f"Initializing BacktestEngine with data directory: {data_dir}, timezone: {timezone}")
         
         self.data_layer = DataLayer(data_dir, timezone=timezone)
+        self.data_layer.engine = self
+        self.data_portal = DataPortal(self.data_layer)
         self.strategy = None
         self.portfolio = None
+        self.broker = None
         self.timezone = timezone
         
         # Trading hours configuration
@@ -98,6 +118,51 @@ class BacktestEngine:
             # Return empty DataFrame instead of raising an error
             return pl.DataFrame()
         return self._pipeline_results[name]
+
+    def _get_open_order_symbols(self):
+        """Return symbols for currently open or partially filled orders."""
+        symbols = set()
+        try:
+            if self.broker is not None and hasattr(self.broker, 'orders'):
+                from vegas.broker.broker import OrderStatus  # local import to avoid cycles at module import time
+                for order in self.broker.orders:
+                    if getattr(order, 'status', None) in (OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED):
+                        sym = getattr(order, 'symbol', None)
+                        if sym:
+                            symbols.add(sym)
+        except Exception:
+            pass
+        return symbols
+
+    def _get_active_position_symbols(self):
+        """Return symbols that currently have a non-zero position size."""
+        symbols = set()
+        try:
+            if self.portfolio is not None and hasattr(self.portfolio, 'positions'):
+                for sym, qty in self.portfolio.positions.items():
+                    try:
+                        if abs(float(qty)) > 1e-6:
+                            symbols.add(sym)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return symbols
+
+    def _discover_universe(self, signals):
+        """Discover dynamic universe from positions, open orders, and current signals."""
+        universe = set()
+        try:
+            universe |= self._get_active_position_symbols()
+            universe |= self._get_open_order_symbols()
+            if signals:
+                for sig in signals:
+                    sym = getattr(sig, 'symbol', None)
+                    if sym:
+                        universe.add(sym)
+        except Exception:
+            pass
+        return universe
         
     def _is_regular_market_hours(self, timestamp):
         """Check if a timestamp falls within regular market hours.
@@ -164,11 +229,23 @@ class BacktestEngine:
         Returns:
             Dictionary with backtest results
         """
-        self._logger.info(f"Starting backtest from {start.date()} to {end.date()}")
+        self._logger.info(f"Starting backtest from {start} to {end}")
         
         # Initialize strategy and portfolio
         self.strategy = strategy
         self.portfolio = Portfolio(initial_capital=initial_capital)
+        # Provide DataPortal to portfolio for price lookups
+        try:
+            self.portfolio.set_data_portal(self.data_portal)
+        except Exception:
+            pass
+        self.broker = Broker(initial_cash=initial_capital)
+        try:
+            # Provide DataPortal to broker for any internal data fetches
+            if hasattr(self.broker, 'set_data_portal'):
+                self.broker.set_data_portal(self.data_portal)
+        except Exception:
+            pass
         
         # Get context and initialize strategy
         context = self.strategy.context
@@ -188,30 +265,24 @@ class BacktestEngine:
         # After initialize, if a commission model was set, persist it on engine for reuse
         try:
             self._commission_model = context.get_commission_model()
+            if self._commission_model is not None:
+                self.broker.commission_model = self._commission_model
         except Exception:
             self._commission_model = None
         
         start_time = time.time()
         
-        # Get data for the backtest period
-        self._logger.info("Loading market data for backtest period")
-        
-        # Add market hours filtering at database level if requested
+        # Configure market hours filter (applied at query time when fetching bar snapshots)
         market_hours = None
         if self._ignore_extended_hours:
             market_hours = (self._market_open_time, self._market_close_time)
-        
-        symbols = context.__dict__.get('symbols')
 
-        market_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=symbols)
-        
-        if market_data.is_empty():
-            self._logger.warning("No data available for the specified period")
-            return self._create_empty_results()
-        
+        # Build unified simulation timestamp index from the data layer (single source of truth)
+        timestamp_index = self.data_layer.get_unified_timestamp_index(start, end)
+
         # Run the backtest
         self._logger.info("Executing backtest")
-        results_dict = self._run_backtest(market_data, context)
+        results_dict = self._run_backtest(context, timestamp_index, market_hours)
         
         # Calculate execution time
         execution_time = time.time() - start_time
@@ -225,7 +296,7 @@ class BacktestEngine:
         
         return results_dict
     
-    def _run_backtest(self, market_data, context):
+    def _run_backtest(self, context, timestamp_index=None, market_hours=None):
         """Run the backtest algorithm.
         
         Args:
@@ -236,17 +307,19 @@ class BacktestEngine:
             Dictionary with backtest results
         """
         try:
-            # The filtering for regular trading hours is now done at database level
-            # We just need to check if we have any data
-            if market_data.is_empty() and self._ignore_extended_hours:
-                self._logger.warning("No data points found within regular market hours!")
+            # Drive the daily iteration from the unified timestamp index when available
+            idx_dates = (
+                pl.DataFrame({"timestamp": timestamp_index})
+                .select(pl.col("timestamp").dt.date().alias("date"))
+                .unique()
+                .sort("date")
+                .get_column("date")
+                )
+            if idx_dates.len() == 0:
+                self._logger.warning("No data available for the specified period")
                 return self._create_empty_results()
             
-            # Group market data by trading day for daily processing
-            market_data = market_data.with_columns(
-                pl.col('timestamp').dt.date().alias('date')
-            )
-            unique_dates = sorted(market_data.select('date').unique().to_series().to_list())
+            unique_dates = idx_dates.to_list()
             self._logger.info(f"Processing {len(unique_dates)} trading days")
             
             # Process data day by day
@@ -254,8 +327,7 @@ class BacktestEngine:
                 # Clear previous pipeline results
                 self._pipeline_results = {}
                 
-                # Get data for the current day
-                daily_data = market_data.filter(pl.col('date') == date)
+                # Get data for the current day (timestamp only used for pipeline scheduling)
                 day_timestamp = datetime.combine(date, datetime.min.time())
                 
                 # Compute any attached pipelines for this day
@@ -279,45 +351,73 @@ class BacktestEngine:
                         pass
                 
                 # Call before_trading_start at the beginning of each day
-                if hasattr(self.strategy, 'before_trading_start'):
-                    # Since we've already filtered at the database level,
-                    # we can just use the first data point of the day
-                    day_start_data = daily_data.sort('timestamp').head(1)
-                        
-                    self.strategy.before_trading_start(context, day_start_data)
+                if hasattr(self.strategy, 'before_trading_start'):                   
+                    self.strategy.before_trading_start(context, self.data_portal)
                 
-                partitioned = daily_data.sort('timestamp').partition_by('timestamp', as_dict=True)
-                sorted_timestamps = sorted(partitioned.keys())
-                
+                # Determine the day's timestamp sequence from unified index
+                day_idx = (
+                    pl.DataFrame({"timestamp": timestamp_index})
+                    .with_columns(pl.col("timestamp").dt.date().alias("date"))
+                    .filter(pl.col("date") == date)
+                    .select("timestamp")
+                    .get_column("timestamp")
+                )
+                iter_timestamps = day_idx.to_list()
+
                 # Process each timestamp chronologically
-                for (ts,), ts_data in daily_data.group_by('timestamp', maintain_order=True):
+                for ts in iter_timestamps:
+                    # no preloaded ts_data; we will fetch a per-tick snapshot instead
                     # Update context with current timestamp
-                    context.current_date = ts.date() if hasattr(ts, 'date') else ts
+                    context.current_date = ts
+                    # Keep DataPortal clock in sync
+                    try:
+                        self.data_portal.set_current_dt(context.current_date)
+                    except Exception:
+                        pass
                     
                     # Call handle_data for each timestamp to generate trading signals
                     if hasattr(self.strategy, 'handle_data'):
-                        signals = self.strategy.handle_data(context, ts_data)
+                        signals = self.strategy.handle_data(context, self.data_portal)
                         
                         if signals:
-                            # Process signals and create transactions
-                            transactions = self._create_transactions_from_signals(signals, ts_data)
-                            
-                            # Update portfolio with transactions
-                            if len(transactions) > 0:
-                                self.portfolio.update_from_transactions(
-                                    ts, 
-                                    transactions,
-                                    ts_data
-                                )
+                            for signal in signals:
+                                self.broker.place_order(signal)
+
+                    # Discover current universe: active positions + open orders + current signals
+                    universe = self._discover_universe(signals if 'signals' in locals() else None)
+                    
+                    # Execute orders using a snapshot sourced via DataPortal to ensure single interface
+                    transactions = []
+                    if universe:
+                        try:
+                            transactions = self.broker.execute_orders_with_portal(self.data_portal, sorted(list(universe)), ts, market_hours)
+                        except Exception:
+                            transactions = []
+
+                    # Update portfolio with transactions
+                    if transactions:
+                        transactions_pl = pl.from_records(
+                            [
+                                {
+                                    "symbol": t.symbol,
+                                    "quantity": t.quantity,
+                                    "price": t.price,
+                                    "commission": t.commission,
+                                }
+                                for t in transactions
+                            ]
+                        )
+                        # Update portfolio (market data ignored internally; prices via DataPortal)
+                        self.portfolio.update_from_transactions(ts, transactions_pl)
                     
                     # Update portfolio state for this timestamp even without transactions
-                    self.portfolio.update_from_transactions(ts, pl.DataFrame(), ts_data)
+                    self.portfolio.update_from_transactions(ts, pl.DataFrame())
                     
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close
-                    is_last_timestamp = ts == daily_data.select(pl.col('timestamp').max()).item()
+                    is_last_timestamp = (ts == max(iter_timestamps)) if len(iter_timestamps) > 0 else False
                     if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
-                        self.strategy.on_market_close(context, ts_data, self.portfolio)
+                        self.strategy.on_market_close(context, self.data_portal, self.portfolio)
             
             # Prepare results
             return {
@@ -330,79 +430,6 @@ class BacktestEngine:
             
         finally:
             self._create_empty_results()
-    
-    def _create_transactions_from_signals(self, signals, market_data):
-        """Convert signals to transactions using the active commission model.
-        
-        Args:
-            signals: List of Signal objects
-            market_data: DataFrame with current market data
-            
-        Returns:
-            DataFrame with transactions
-        """
-        if not signals:
-            return pl.DataFrame()
-            
-        transactions = []
-        
-        # Create a lookup for current prices
-        price_lookup = {}
-        if not market_data.is_empty() and 'symbol' in market_data.columns and 'close' in market_data.columns:
-            price_lookup = {row['symbol']: row['close'] for row in market_data.select(['symbol', 'close']).to_dicts()}
-
-        # Determine commission model from strategy context, or default to a minimal per-share model
-        commission_model = None
-        try:
-            commission_model = self.strategy.context.get_commission_model()
-        except Exception:
-            commission_model = None
-
-        if commission_model is None:
-            try:
-                from vegas.broker.commission import PerShareCommissionModel
-                commission_model = PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
-            except Exception:
-                commission_model = None
-        
-        for signal in signals:
-            try:
-                # Check if signal is valid
-                if not hasattr(signal, 'symbol') or not hasattr(signal, 'action') or not hasattr(signal, 'quantity'):
-                    self._logger.warning(f"Invalid signal: {signal}")
-                    continue
-                
-                symbol = signal.symbol
-                action = signal.action
-                quantity = signal.quantity
-                
-                # Skip if symbol not in current market data
-                if symbol not in price_lookup:
-                    self._logger.warning(f"Symbol {symbol} not in current market data")
-                    continue
-                    
-                # Get execution price
-                price = signal.price if hasattr(signal, 'price') and signal.price is not None else price_lookup[symbol]
-                
-                # Convert action to quantity (positive for buy, negative for sell)
-                if action.lower() == 'sell':
-                    quantity = -abs(quantity)
-                
-                # Commission via selected model (if any)
-                commission = 0.0
-                if commission_model is not None:
-                    commission = float(commission_model.calculate_commission(price, quantity))
-                
-                transactions.append({
-                    'symbol': symbol,
-                    'quantity': quantity,
-                    'price': price,
-                    'commission': commission
-                })
-            except Exception as e:
-                self._logger.error(f"Error processing signal: {e}")
-        
-        return pl.DataFrame(transactions) if transactions else pl.DataFrame()
     
     def _create_empty_results(self):
         """Create empty results dictionary for when no data is available."""
@@ -419,8 +446,6 @@ class BacktestEngine:
             'success': False
         }
 
-    # --- Live mode entry point (guarded hooks, no change to default run path) ---
-
     def run_live(self, start, end, strategy, feed=None, broker=None):
         """
         Run in a live-like loop using an optional MarketDataFeed and a BrokerAdapter-compatible object.
@@ -428,173 +453,4 @@ class BacktestEngine:
           - initial_capital is NOT used here; cash/positions are seeded from broker.get_account()/get_positions()
           - When no feed is provided, this method delegates to run() for historical mode.
         """
-        self._logger.info(f"Starting live mode from {start.date()} to {end.date()}")
-
-        # Initialize strategy and portfolio (no initial_capital assumption)
-        self.strategy = strategy
-        self.portfolio = Portfolio(initial_capital=0.0)  # placeholder, will be set by snapshot
-
-        context = self.strategy.context
-        context.set_portfolio(self.portfolio)
-        context.set_engine(self)
-        try:
-            setattr(context, "mode", "live")
-        except Exception:
-            pass
-
-        # Expose commission namespace for user convenience before initialize()
-        try:
-            from vegas.broker.commission import commission as _commission_ns
-            context.commission = _commission_ns
-        except Exception:
-            pass
-
-        # Strategy may set commission, etc.
-        self.strategy.initialize(context)
-
-        try:
-            self._commission_model = context.get_commission_model()
-        except Exception:
-            self._commission_model = None
-
-        # If we don't have a feed, fall back to the historical path to keep behavior unchanged
-        if feed is None:
-            self._logger.info("No feed provided to run_live; delegating to historical run()")
-            return self.run(start, end, strategy, initial_capital=100000.0)
-
-        # Load reference historical data for end-of-day boundary checks
-        market_hours = None
-        if self._ignore_extended_hours:
-            market_hours = (self._market_open_time, self._market_close_time)
-        symbols = context.__dict__.get('symbols')
-        reference_data = self.data_layer.get_data_for_backtest(start, end, market_hours=market_hours, symbols=symbols)
-
-        # Seed portfolio from broker snapshot if provided
-        if broker is not None:
-            try:
-                acct = broker.get_account()  # expects {'cash': ..., ...}
-                positions = broker.get_positions()  # expects {sym: {'quantity': q, 'avg_price': p}}
-                cash = float(acct.get('cash', 0.0)) if isinstance(acct, dict) else 0.0
-                pos_dict = positions if isinstance(positions, dict) else {}
-                self.portfolio.set_account_snapshot(cash, pos_dict)
-            except Exception as e:
-                self._logger.warning(f"Failed to seed portfolio from broker snapshot: {e}")
-
-        # Start feed
-        try:
-            feed.start()
-        except Exception:
-            pass
-
-        # For simulated execution support
-        try:
-            from vegas.broker.adapters import SimulatedBrokerAdapter  # type: ignore
-        except Exception:
-            SimulatedBrokerAdapter = None  # type: ignore
-
-        start_time = time.time()
-
-        while True:
-            nxt = feed.next_bar()
-            if nxt is None:
-                break
-
-            ts, ts_data = nxt
-            if not isinstance(ts_data, pl.DataFrame):
-                try:
-                    ts_data = pl.from_pandas(ts_data)
-                except Exception:
-                    ts_data = pl.DataFrame()
-
-            # Update context current time
-            context.current_date = ts.date() if hasattr(ts, 'date') else ts
-
-            # Strategy handle_data
-            signals = None
-            if hasattr(self.strategy, 'handle_data'):
-                signals = self.strategy.handle_data(context, ts_data)
-
-            transactions_pl = pl.DataFrame()
-
-            if signals:
-                if broker is not None:
-                    # Place orders
-                    for sig in signals:
-                        try:
-                            broker.place_order(sig)
-                        except Exception as e:
-                            self._logger.error(f"broker.place_order error: {e}")
-
-                    # Simulated immediate execution path
-                    if SimulatedBrokerAdapter is not None and isinstance(broker, SimulatedBrokerAdapter):
-                        snapshot = {}
-                        if 'symbol' in ts_data.columns:
-                            for sym in ts_data.select('symbol').unique().to_series().to_list():
-                                snapshot[sym] = ts_data.filter(pl.col('symbol') == sym)
-                        try:
-                            fills = broker.simulate_execute(snapshot, ts)
-                        except Exception as e:
-                            self._logger.error(f"SimulatedBrokerAdapter.simulate_execute error: {e}")
-                            fills = []
-
-                        if fills:
-                            tx_rows = [{
-                                'symbol': getattr(tx, 'symbol', None),
-                                'quantity': getattr(tx, 'quantity', 0.0),
-                                'price': getattr(tx, 'price', 0.0),
-                                'commission': float(getattr(tx, 'commission', 0.0) or 0.0),
-                            } for tx in fills]
-                            transactions_pl = pl.DataFrame(tx_rows) if tx_rows else pl.DataFrame()
-                    else:
-                        # External broker: poll fills
-                        try:
-                            fills = broker.poll_fills(until=ts)
-                        except Exception as e:
-                            self._logger.error(f"broker.poll_fills error: {e}")
-                            fills = []
-                        if fills:
-                            tx_rows = []
-                            for tx in fills:
-                                if isinstance(tx, dict):
-                                    tx_rows.append({
-                                        'symbol': tx.get('symbol'),
-                                        'quantity': tx.get('quantity', 0.0),
-                                        'price': tx.get('price', 0.0),
-                                        'commission': float(tx.get('commission', 0.0) or 0.0),
-                                    })
-                            transactions_pl = pl.DataFrame(tx_rows) if tx_rows else pl.DataFrame()
-                else:
-                    # Fallback to local transaction creation
-                    transactions_pl = self._create_transactions_from_signals(signals, ts_data)
-
-            # Update portfolio on every bar
-            if len(transactions_pl) > 0:
-                self.portfolio.update_from_transactions(ts, transactions_pl, ts_data)
-            self.portfolio.update_from_transactions(ts, pl.DataFrame(), ts_data)
-
-            # on_market_close at last timestamp for the day (using reference_data to find day max)
-            try:
-                day = ts.date()
-                day_data = reference_data.filter(pl.col('timestamp').dt.date() == day)
-                is_last_timestamp = False
-                if not day_data.is_empty():
-                    day_max = day_data.select(pl.col('timestamp').max()).item()
-                    is_last_timestamp = ts == day_max
-                if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
-                    self.strategy.on_market_close(context, ts_data, self.portfolio)
-            except Exception:
-                pass
-
-        execution_time = time.time() - start_time
-        results_dict = {
-            'stats': self.portfolio.get_stats(),
-            'equity_curve': self.portfolio.get_equity_curve(),
-            'transactions': self.portfolio.get_transactions(),
-            'positions': self.portfolio.get_positions(),
-            'execution_time': execution_time,
-            'success': True
-        }
-
-        # Allow strategy to analyze results
-        self.strategy.analyze(context, results_dict)
-        return results_dict
+        pass
