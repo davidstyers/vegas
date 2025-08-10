@@ -2,7 +2,7 @@
 
 This module provides a portfolio tracking system for event-driven backtesting.
 """
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
 import polars as pl
@@ -12,7 +12,7 @@ EPS = 1e-6
 
 
 class Position:
-    """A class representing a portfolio position (long or short)."""
+    """Representation of a single portfolio position (long or short)."""
     def __init__(self, symbol: str, quantity: float, value: float = 0.0):
         self.symbol = symbol
         self.quantity = quantity  # negative quantity represents a short
@@ -26,8 +26,14 @@ class Position:
 
 
 class Portfolio:
-    """Portfolio tracking system for the Vegas event-driven backtesting engine."""
-    def __init__(self, initial_capital: float = 100000.0):
+    """Portfolio accounting and state management for backtests.
+
+    Tracks cash, positions, average prices, equity history, and applies a
+    simple Reg T approximation for short margin and buying power. The
+    portfolio consults the injected `DataPortal` for pricing when updating
+    from transactions.
+    """
+    def __init__(self, initial_capital: float = 100000.0, data_portal=None):
         self.initial_capital = initial_capital
         self.current_cash = initial_capital
         self.positions: Dict[str, float] = {}        # symbol -> quantity (can be negative for shorts)
@@ -37,6 +43,10 @@ class Portfolio:
         # Average entry price (moving average) for current net position per symbol
         self.avg_price: Dict[str, float] = {}
         self.current_equity = initial_capital
+
+        # Whether this portfolio is seeded from a live broker snapshot.
+        # When set, initial_capital remains as a reference but not used to assert returns in live mode.
+        self._seeded_from_snapshot = False
 
         # Margin and buying power tracking
         self.short_margin_requirement: float = 0.0  # Total margin requirement for shorts
@@ -51,13 +61,58 @@ class Portfolio:
         self._last_price: Dict[str, float] = {}
 
         self._logger = logging.getLogger('vegas.portfolio')
+        # Optional DataPortal for price lookups
+        self._data_portal = data_portal
+
+    def set_account_snapshot(self, cash: float, positions_dict: Dict[str, Dict[str, float]]) -> None:
+        """Seed portfolio from an external brokerage snapshot.
+
+        Positions dict example:
+            {'AAPL': {'quantity': 10.0, 'avg_price': 180.0}, 'MSFT': {'quantity': -5.0, 'avg_price': 410.0}}
+
+        - Sets cash and loads positions and average prices
+        - Recomputes equity from snapshot values
+        - Marks portfolio as seeded from snapshot
+        """
+        try:
+            self.current_cash = float(cash)
+        except Exception:
+            self.current_cash = cash
+
+        self.positions = {}
+        self.avg_price = {}
+        self.position_values = {}
+        self.transaction_history = []
+        self.position_history = []
+        self.equity_history = []
+
+        # Load positions and average prices from snapshot
+        for sym, info in positions_dict.items():
+            qty = float(info.get("quantity", 0.0))
+            if abs(qty) < EPS:
+                continue
+            avg_px = float(info.get("avg_price", 0.0))
+            self.positions[sym] = qty
+            self.avg_price[sym] = abs(avg_px)
+
+        # With no market data at snapshot time, approximate equity by cash + sum(qty*avg_price)
+        total_position_value = 0.0
+        for sym, qty in self.positions.items():
+            px = float(self.avg_price.get(sym, 0.0))
+            total_position_value += qty * px
+
+        self.current_equity = self.current_cash + total_position_value
+        self._seeded_from_snapshot = True
+
+        # Record a synthetic equity snapshot with timestamp=epoch 0 to indicate seeding point will be recorded on first bar
+        # We avoid adding a timestamped equity row here to let engine add the first bar state.
 
     def _recompute_short_margin_and_buying_power(self):
-        """Recompute short margin requirement and buying power using Reg T approximation.
+        """Recompute short margin requirement and buying power (Reg T approximation).
 
-        Reg T short initial margin: 150% of current short market value.
-        Requirement = 1.5 * sum(|qty| * price) for all short positions.
-        Buying power = current_cash + long_market_value - requirement.
+        - Short initial margin approximated as 150% of current short market value
+        - Requirement = 1.5 * sum(|qty| * price) across shorts
+        - Buying power = current_cash + long_market_value - requirement
         """
         total_short_market_value = 0.0
         total_long_market_value = 0.0
@@ -74,11 +129,11 @@ class Portfolio:
         self.buying_power = self.current_cash + total_long_market_value - self.short_margin_requirement
 
     def _adjust_for_buying_power(self, symbol: str, quantity: float, price: float, commission: float) -> float:
-        """Adjust order quantity to respect buying power with Reg T margin for shorts.
+        """Adjust order size to respect cash/margin constraints.
 
-        For longs: require cash >= qty*price + commission (existing approach).
-        For shorts: require buying_power >= delta_requirement where
-          delta_requirement = 1.5 * (abs(new_short_mv) - abs(old_short_mv_for_symbol))
+        Longs: require cash >= qty*price + commission.
+        Shorts: require additional short requirement delta to be <= buying_power,
+        where delta = 1.5 * (|new_short_mv| - |old_short_mv|).
         """
         if quantity > 0:
             # Long buy check against cash
@@ -139,17 +194,19 @@ class Portfolio:
         )
         return adjusted_qty
 
-    def update_from_transactions(self, timestamp, transactions, market_data):
-        """Update portfolio based on executed transactions and current market data.
+    def update_from_transactions(self, timestamp, transactions, market_data: Optional[pl.DataFrame] = None):
+        """Update state from executed transactions and revalue the portfolio.
 
-        Transactions: columns: symbol, quantity, price, commission
-        Allows short-selling with Reg T 150% initial margin.
+        Notes:
+        - `market_data` is ignored; prices come from the injected `DataPortal`.
+        - `transactions` must have: symbol, quantity, price, commission.
+        - Supports short-selling with Reg T 150% initial margin approximation.
         """
 
         def _format_trade_message(trade):
             side = "BOT" if trade['quantity'] > 0 else "SLD"
             abs_qty = abs(trade['quantity'])
-            msg = f"{side} {abs_qty} {trade['symbol']} @ ${trade['price']:.2f} Commission ${trade['commission']:.2f} "
+            msg = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} {side} {abs_qty} {trade['symbol']} @ ${trade['price']:.2f} Commission ${trade['commission']:.2f} "
             return msg
 
         # Process transactions
@@ -223,22 +280,24 @@ class Portfolio:
                 msg = _format_trade_message(trade)
                 self._logger.info(msg)
 
-        # Update position values based on current market data
+        # Update position values using DataPortal-derived prices only
         self.position_values = {}
         total_position_value = 0.0
-
-        price_lookup = {}
-        if 'symbol' in market_data.columns and 'close' in market_data.columns:
-            price_lookup = {row['symbol']: float(row['close']) for row in market_data.select(['symbol', 'close']).to_dicts()}
-
-        # Opportunistically update last-known cache from available market data prices
-        # Only learn from explicit price_lookup values as specified
-        for sym, px in price_lookup.items():
-            if px is not None:
-                self._last_price[sym] = float(px)
+        
+        # Build a lookup of current prices for all open position symbols via DataPortal
+        price_lookup: Dict[str, float] = {}
+        if self._data_portal is not None:
+            for symbol in list(self.positions.keys()):
+                try:
+                    px = self._data_portal.get_spot_value(symbol, 'close', timestamp)
+                except Exception:
+                    px = None
+                if px is not None:
+                    price_lookup[symbol] = float(px)
+                    self._last_price[symbol] = float(px)
 
         for symbol, qty in self.positions.items():
-            # Resolve current price with precedence: price_lookup -> last known -> 0.0
+            # Resolve current price with precedence: portal lookup -> last known -> 0.0
             if symbol in price_lookup:
                 current_price = float(price_lookup[symbol])
             else:
@@ -416,3 +475,269 @@ class Portfolio:
                 stats['annual_return_pct'] = 0.0
 
         return stats
+
+    def build_positions_ledger(self, latest_price_lookup: Optional[Dict[str, float]] = None) -> pl.DataFrame:
+        """
+        Build and return a complete positions ledger (open and closed) as a Polars DataFrame.
+
+        The ledger reconstructs position lifecycles from the recorded transaction_history and
+        position/equity snapshots, producing one row per realized or still-open position.
+
+        Columns:
+          - symbol: str
+          - pos_open_ts: datetime
+          - pos_close_ts: datetime or None (if still open)
+          - side: 'LONG' or 'SHORT'
+          - qty_open: float (absolute number of shares at open)
+          - qty_close: float (absolute number of shares closed; equals qty_open for fully closed)
+          - buy_price: float (average entry price for the net position)
+          - exit_price: float or None (for open positions, uses last known/lookup price)
+          - realized_pnl: float (only for closed positions)
+          - unrealized_pnl: float (only for open positions)
+          - pnl_dollars: float (realized for closed, mark-to-market for open)
+          - pnl_pct: float (% relative to notional |qty|*buy_price)
+          - commissions: float (sum of commissions across all trades in the position window)
+
+        Note:
+          - This reconstruction assumes FIFO at the net-position level, matching how avg_price is tracked.
+          - For open positions without a current price available, exit_price will be None and P&L = 0.0.
+
+        Args:
+          latest_price_lookup: Optional mapping symbol->last price to value open positions.
+
+        Returns:
+          Polars DataFrame with the ledger rows (possibly empty).
+        """
+        # Fast return if no transactions ever recorded
+        if not self.transaction_history:
+            return pl.DataFrame(schema={
+                "symbol": pl.Utf8,
+                "pos_open_ts": pl.Datetime("ns"),
+                "pos_close_ts": pl.Datetime("ns"),
+                "side": pl.Utf8,
+                "qty_open": pl.Float64,
+                "qty_close": pl.Float64,
+                "buy_price": pl.Float64,
+                "exit_price": pl.Float64,
+                "realized_pnl": pl.Float64,
+                "unrealized_pnl": pl.Float64,
+                "pnl_dollars": pl.Float64,
+                "pnl_pct": pl.Float64,
+                "commissions": pl.Float64,
+            })
+
+        # Group transactions by symbol in timestamp order
+        tx_df = pl.DataFrame(self.transaction_history)
+        tx_df = tx_df.sort("timestamp")
+
+        rows: List[Dict[str, Any]] = []
+        latest_price_lookup = latest_price_lookup or {}
+
+        # Helper to finalize and append a ledger row
+        def _append_row(symbol: str,
+                        open_ts: datetime,
+                        close_ts: Optional[datetime],
+                        side: str,
+                        qty_open: float,
+                        qty_close: float,
+                        buy_price: float,
+                        exit_price: Optional[float],
+                        commissions: float) -> None:
+            notional = abs(qty_open) * abs(buy_price)
+            if exit_price is None:
+                pnl = 0.0
+                pnl_pct = 0.0
+            else:
+                # P&L sign depends on side and direction
+                sign = 1.0 if side == "LONG" else -1.0
+                pnl = sign * (exit_price - buy_price) * abs(qty_close)
+                pnl_pct = (pnl / notional * 100.0) if notional > EPS else 0.0
+
+            realized = 0.0
+            unrealized = 0.0
+            if close_ts is None:
+                # open position -> unrealized
+                unrealized = float(pnl)
+            else:
+                realized = float(pnl)
+
+            rows.append({
+                "symbol": symbol,
+                "pos_open_ts": open_ts,
+                "pos_close_ts": close_ts,
+                "side": side,
+                "qty_open": float(qty_open),
+                "qty_close": float(qty_close),
+                "buy_price": float(buy_price),
+                "exit_price": None if exit_price is None else float(exit_price),
+                "realized_pnl": realized,
+                "unrealized_pnl": unrealized,
+                "pnl_dollars": float(pnl),
+                "pnl_pct": float(pnl_pct),
+                "commissions": float(commissions),
+            })
+
+        # Reconstruct per-symbol lifecycles by walking quantity over time
+        for symbol, sym_tx in tx_df.group_by("symbol", maintain_order=True):
+            # state for current net position
+            net_qty = 0.0
+            avg_px = 0.0
+            pos_open_ts: Optional[datetime] = None
+            side: Optional[str] = None
+            accrued_commission = 0.0
+
+            for tx in sym_tx.iter_rows(named=True):
+                ts: datetime = tx["timestamp"]
+                qty: float = float(tx["quantity"])
+                px: float = float(tx["price"])
+                com: float = float(tx.get("commission", 0.0) or 0.0)
+                accrued_commission += com
+
+                prev_qty = net_qty
+                new_qty = prev_qty + qty
+
+                if abs(prev_qty) < EPS:
+                    # Opening a new net position
+                    net_qty = new_qty
+                    if abs(net_qty) < EPS:
+                        # Degenerate open/close same tick; treat as no-op
+                        continue
+                    side = "LONG" if net_qty > 0 else "SHORT"
+                    avg_px = abs(px)
+                    pos_open_ts = ts
+                    continue
+
+                # Same side?
+                prev_side_long = prev_qty > 0
+                new_side_long = new_qty > 0
+                same_side = (prev_side_long and new_side_long) or ((not prev_side_long) and (not new_side_long))
+
+                if same_side:
+                    # increasing or reducing on same side
+                    if abs(new_qty) > abs(prev_qty):
+                        # adding -> moving average
+                        avg_px = (abs(avg_px) * abs(prev_qty) + abs(px) * abs(qty)) / abs(new_qty)
+                        net_qty = new_qty
+                    else:
+                        # reducing but still same side -> keep avg_px
+                        net_qty = new_qty
+                else:
+                    # Crossing through zero: close previous and open new residual
+                    # Close leg uses the trade price 'px' as exit
+                    close_qty = abs(prev_qty)
+                    _append_row(
+                        symbol=symbol,
+                        open_ts=pos_open_ts if pos_open_ts is not None else ts,
+                        close_ts=ts,
+                        side="LONG" if prev_qty > 0 else "SHORT",
+                        qty_open=abs(prev_qty),
+                        qty_close=close_qty,
+                        buy_price=avg_px,
+                        exit_price=abs(px),
+                        commissions=accrued_commission
+                    )
+                    # Start a new position with the remainder
+                    residual = new_qty  # signed
+                    if abs(residual) < EPS:
+                        # fully flat after crossing; reset state
+                        net_qty = 0.0
+                        avg_px = 0.0
+                        pos_open_ts = None
+                        side = None
+                        accrued_commission = 0.0
+                    else:
+                        net_qty = residual
+                        side = "LONG" if net_qty > 0 else "SHORT"
+                        avg_px = abs(px)
+                        pos_open_ts = ts
+                        accrued_commission = 0.0  # commissions after close attributed to next cycle
+
+            # End of symbol transactions: if still open, mark-to-market with last known price
+            if abs(net_qty) > EPS and pos_open_ts is not None and side is not None:
+                # Resolve exit/mark price: prefer provided lookup, else DataPortal at last equity ts, else last known cache, else None
+                exit_px: Optional[float] = None
+                if symbol in latest_price_lookup:
+                    exit_px = float(latest_price_lookup[symbol])
+                else:
+                    # Try DataPortal at the most recent equity snapshot timestamp
+                    last_ts: Optional[datetime] = None
+                    try:
+                        if self.equity_history:
+                            last_ts = self.equity_history[-1]['timestamp']
+                        elif self.transaction_history:
+                            last_ts = self.transaction_history[-1]['timestamp']
+                    except Exception:
+                        last_ts = None
+                    if self._data_portal is not None and last_ts is not None:
+                        try:
+                            spot = self._data_portal.get_spot_value(symbol, 'close', last_ts)
+                            if spot is not None:
+                                exit_px = float(spot)
+                        except Exception:
+                            exit_px = None
+                    if exit_px is None:
+                        exit_px = float(self._last_price.get(symbol)) if symbol in self._last_price else None
+
+                _append_row(
+                    symbol=symbol,
+                    open_ts=pos_open_ts,
+                    close_ts=None,
+                    side=side,
+                    qty_open=abs(net_qty),
+                    qty_close=abs(net_qty),
+                    buy_price=avg_px,
+                    exit_price=exit_px,
+                    commissions=accrued_commission
+                )
+
+        if not rows:
+            return pl.DataFrame(schema={
+                "symbol": pl.Utf8,
+                "pos_open_ts": pl.Datetime("ns"),
+                "pos_close_ts": pl.Datetime("ns"),
+                "side": pl.Utf8,
+                "qty_open": pl.Float64,
+                "qty_close": pl.Float64,
+                "buy_price": pl.Float64,
+                "exit_price": pl.Float64,
+                "realized_pnl": pl.Float64,
+                "unrealized_pnl": pl.Float64,
+                "pnl_dollars": pl.Float64,
+                "pnl_pct": pl.Float64,
+                "commissions": pl.Float64,
+            })
+
+        df = pl.DataFrame(rows)
+
+        # Normalize/ensure scalar dtypes; guard against any list-typed columns due to mixed inputs
+        # Cast columns only if their dtype is not already correct and not a List.
+        safe_exprs = []
+        for col, dtype in [
+            ("symbol", pl.Utf8),
+            ("pos_open_ts", pl.Datetime("ns")),
+            ("pos_close_ts", pl.Datetime("ns")),
+            ("side", pl.Utf8),
+            ("qty_open", pl.Float64),
+            ("qty_close", pl.Float64),
+            ("buy_price", pl.Float64),
+            ("exit_price", pl.Float64),
+            ("realized_pnl", pl.Float64),
+            ("unrealized_pnl", pl.Float64),
+            ("pnl_dollars", pl.Float64),
+            ("pnl_pct", pl.Float64),
+            ("commissions", pl.Float64),
+        ]:
+            if col in df.columns:
+                c = df.get_column(col)
+                # If column accidentally ended up as a List type, collapse lists by taking first non-null element
+                if isinstance(c.dtype, pl.List):
+                    df = df.with_columns(pl.col(col).list.first().alias(col))
+                # After ensuring scalar, cast to target dtype
+                safe_exprs.append(pl.col(col).cast(dtype))
+
+        if safe_exprs:
+            df = df.with_columns(safe_exprs)
+
+        df = df.sort(["symbol", "pos_open_ts", "pos_close_ts"])
+
+        return df

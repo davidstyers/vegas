@@ -2,98 +2,67 @@
 
 This module defines common basic factors like Returns and moving averages.
 """
-import numpy as np
-import pandas as pd
+import polars as pl
 from vegas.pipeline.factors.custom import CustomFactor
 
 
 class Returns(CustomFactor):
-    """
-    Factor computing the percentage change in price over a given window.
+    """Percentage change in price over a lookback window.
+
+    :param inputs: Column names to use as inputs (defaults to ['close']).
+    :type inputs: list[str]
+    :param window_length: Number of rows to compute the change over (>=2 for pct_change).
+    :type window_length: int
+    :returns: Polars expression computing percentage change per symbol.
+    :rtype: pl.Expr
+    :Example:
+        >>> Returns(inputs=["close"], window_length=2)
     """
     inputs = ['close']
     window_length = 2  # Default to daily returns
     
-    def compute(self, today, assets, out, closes):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression for computing returns.
+
+        :returns: Polars expression computing percentage change by symbol.
+        :rtype: pl.Expr
+        :Example:
+            >>> expr = Returns().to_expression()
         """
-        Calculate returns from price data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        closes : np.array
-            Price data arrays to compute returns from
-        """
-        try:
-            # Ensure data is the right shape
-            if closes.ndim == 1:
-                closes = closes.reshape(-1, 1)
-            
-            # Calculate returns
-            out[:] = (closes[-1] - closes[0]) / closes[0]
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).pct_change(n=self.window_length - 1).over('symbol')
 
 
 class SimpleMovingAverage(CustomFactor):
-    """
-    Factor computing a simple moving average of a data input.
-    
-    Examples
-    --------
-    Calculate a 10-day SMA of closing prices:
-    
-    >>> sma = SimpleMovingAverage(inputs=['close'], window_length=10)
+    """Simple moving average of a data input.
+
+    Example:
+        >>> sma = SimpleMovingAverage(inputs=['close'], window_length=10)
     """
     inputs = ['close']  # Default to close prices
     window_length = 10  # Default to 10-day moving average
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression for SMA.
+
+        :returns: Polars expression computing SMA by symbol.
+        :rtype: pl.Expr
+        :Example:
+            >>> expr = SimpleMovingAverage().to_expression()
         """
-        Calculate simple moving average.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute moving average from
-        """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-            
-            # Calculate mean along axis 0 (time)
-            out[:] = np.nanmean(data, axis=0)
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
 
 
 class ExponentialWeightedMovingAverage(CustomFactor):
-    """
-    Factor computing an exponentially-weighted moving average of a data input.
-    
-    Parameters
-    ----------
-    inputs : list, optional
-        A list of data inputs to use in compute.
-    window_length : int, optional
-        The number of rows of data to pass to compute.
-    decay_rate : float, optional
-        The rate at which weights decrease. Higher values means more weight
-        for more recent observations.
+    """Exponentially-weighted moving average of a data input.
+
+    :param inputs: Input column(s) (default ['close']).
+    :type inputs: list[str] | None
+    :param window_length: Number of rows included in the window.
+    :type window_length: int | None
+    :param decay_rate: Weight decay factor (higher emphasizes recent values).
+    :type decay_rate: float
+    :Example:
+        >>> ewma = ExponentialWeightedMovingAverage(decay_rate=0.3)
     """
     inputs = ['close']  # Default to close prices
     window_length = 10  # Default to 10-day moving average
@@ -102,125 +71,47 @@ class ExponentialWeightedMovingAverage(CustomFactor):
         self.decay_rate = decay_rate
         super().__init__(inputs=inputs, window_length=window_length, mask=mask)
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression for EWMA.
+
+        :returns: Polars expression computing EWMA by symbol.
+        :rtype: pl.Expr
+        :Example:
+            >>> expr = ExponentialWeightedMovingAverage().to_expression()
         """
-        Calculate exponentially-weighted moving average.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute moving average from
-        """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-                
-            # Create weights that exponentially decay based on the provided rate
-            # The weights array will have shape (window_length,)
-            weights = np.power(self.decay_rate, np.arange(self.window_length - 1, -1, -1))
-            
-            # Normalize weights to sum to 1
-            weights = weights / np.sum(weights)
-            
-            # Weighted average (handle NaNs by setting them to 0 and renormalizing weights)
-            weighted_data = data * weights.reshape(-1, 1)  # Broadcasting weights across assets
-            
-            # Handle NaNs by using nansum and rescaling weights
-            mask = ~np.isnan(data)
-            valid_weights = np.sum(weights.reshape(-1, 1) * mask, axis=0)  # Sum of weights for non-NaN values
-            out[:] = np.nansum(weighted_data, axis=0) / valid_weights
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).ewm_mean(alpha=self.decay_rate, adjust=False).over('symbol')
 
 
 class VWAP(CustomFactor):
-    """
-    Factor computing Volume Weighted Average Price.
-    
-    Volume Weighted Average Price (VWAP) is the ratio of the value traded to total volume
-    traded over a particular time horizon (usually one day).
+    """Volume Weighted Average Price over the window.
+
+    VWAP is the ratio of traded value to traded volume over a window (often one day).
     """
     inputs = ['close', 'volume']
     window_length = 1  # Default to single day VWAP
     
-    def compute(self, today, assets, out, closes, volumes):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression computing VWAP.
+
+        :returns: Polars expression for VWAP by symbol.
+        :rtype: pl.Expr
+        :Example:
+            >>> expr = VWAP().to_expression()
         """
-        Calculate VWAP from price and volume data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        closes : np.array
-            Price data
-        volumes : np.array
-            Volume data
-        """
-        try:
-            # Ensure data is the right shape
-            if closes.ndim == 1:
-                closes = closes.reshape(-1, 1)
-            if volumes.ndim == 1:
-                volumes = volumes.reshape(-1, 1)
-                
-            # Calculate the product of price and volume
-            value_traded = closes * volumes
-            
-            # Calculate VWAP
-            with np.errstate(divide='ignore', invalid='ignore'):  # Ignore divide by zero warnings
-                out[:] = np.nansum(value_traded, axis=0) / np.nansum(volumes, axis=0)
-            
-            # Replace any NaNs or infinities with the simple average price
-            invalid_mask = ~np.isfinite(out)
-            if np.any(invalid_mask):
-                # For assets with zero volume, use the simple average price
-                out[invalid_mask] = np.nanmean(closes[:, invalid_mask], axis=0)
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return (pl.col('close') * pl.col('volume')).sum().over('symbol') / pl.col('volume').sum().over('symbol')
 
 
 class StandardDeviation(CustomFactor):
-    """
-    Factor computing the standard deviation of a data input over a window.
-    """
+    """Rolling standard deviation of a data input over a window."""
     inputs = ['close']  # Default to close prices
     window_length = 10  # Default to 10-day window
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression computing rolling std by symbol.
+
+        :returns: Polars expression computing standard deviation.
+        :rtype: pl.Expr
+        :Example:
+            >>> expr = StandardDeviation().to_expression()
         """
-        Calculate standard deviation.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute standard deviation from
-        """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-            
-            # Calculate standard deviation along axis 0 (time)
-            out[:] = np.nanstd(data, axis=0)
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan 
+        return pl.col(self.inputs[0]).rolling_std(self.window_length).over('symbol')

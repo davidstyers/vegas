@@ -2,18 +2,17 @@
 
 This module defines more complex filters like All, Any, and AtLeastN.
 """
-import numpy as np
+import polars as pl
 from vegas.pipeline.terms import Filter, Term
 
 
 class All(Filter):
-    """
-    A Filter that requires all inputs to be True.
-    
-    Parameters
-    ----------
-    filters : list[Filter]
-        The filters to combine with AND logic.
+    """Filter that requires all inputs to be True.
+
+    :param filters: Filters to combine with logical AND.
+    :type filters: list[Filter]
+    :Example:
+        >>> mask = All(f1, f2, f3)
     """
     
     def __init__(self, *filters):
@@ -21,37 +20,25 @@ class All(Filter):
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression for logical AND over inputs.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
-        Compute the logical AND of all input filters.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
-        """
-        # Start with all True
-        out[:] = True
-        
-        # Logical AND with each input
-        for i in range(len(inputs)):
-            out &= inputs[i]
+        expr = self.filters[0].to_expression()
+        for f in self.filters[1:]:
+            expr = expr & f.to_expression()
+        return expr
 
 
 class Any(Filter):
-    """
-    A Filter that requires at least one input to be True.
-    
-    Parameters
-    ----------
-    filters : list[Filter]
-        The filters to combine with OR logic.
+    """Filter that requires at least one input to be True.
+
+    :param filters: Filters to combine with logical OR.
+    :type filters: list[Filter]
+    :Example:
+        >>> mask = Any(f1, f2)
     """
     
     def __init__(self, *filters):
@@ -59,39 +46,28 @@ class Any(Filter):
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression for logical OR over inputs.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
-        Compute the logical OR of all input filters.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
-        """
-        # Start with all False
-        out[:] = False
-        
-        # Logical OR with each input
-        for i in range(len(inputs)):
-            out |= inputs[i]
+        expr = self.filters[0].to_expression()
+        for f in self.filters[1:]:
+            expr = expr | f.to_expression()
+        return expr
 
 
 class AtLeastN(Filter):
-    """
-    A Filter requiring at least N of the inputs filters to be True.
-    
-    Parameters
-    ----------
-    n : int
-        Minimum number of filters that must be True.
-    filters : list[Filter]
-        The filters to check.
+    """Filter requiring at least N of the inputs to be True.
+
+    :param n: Minimum number of filters that must be True.
+    :type n: int
+    :param filters: Filters to evaluate.
+    :type filters: list[Filter]
+    :raises ValueError: If ``n`` is < 1 or greater than number of filters.
+    :Example:
+        >>> mask = AtLeastN(2, f1, f2, f3)
     """
     
     def __init__(self, n, *filters):
@@ -106,78 +82,49 @@ class AtLeastN(Filter):
         
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
+        """Return a boolean expression for at least N True inputs.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
-        Compute whether at least N of the input filters are True.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
-        """
-        # Count how many filters are True for each asset
-        count = np.zeros_like(out, dtype=int)
-        for i in range(len(inputs)):
-            count += inputs[i]
-        
-        # Check if count reaches the threshold
-        out[:] = count >= self.n
+        return pl.sum_horizontal([f.to_expression() for f in self.filters]) >= self.n
 
 
 class NotMissing(Filter):
-    """
-    A Filter selecting assets with non-missing data.
-    
-    Parameters
-    ----------
-    term : Term
-        Term to check for missing values.
+    """Filter selecting assets with non-missing data for a term.
+
+    :param term: Term whose values are checked for missingness.
+    :type term: Term
+    :Example:
+        >>> mask = NotMissing(my_factor)
     """
     
     def __init__(self, term):
         self.term = term
         super().__init__(inputs=[term], window_length=term.window_length)
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
+        """Return a boolean mask for non-missing values.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
-        Identify assets with non-missing data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        data : np.array
-            Data to check for missing values
-        """
-        # Check if any value in the last row is missing
-        if data.ndim > 1:
-            out[:] = ~np.isnan(data[-1])
-        else:
-            out[:] = ~np.isnan(data)
+        return self.term.to_expression().is_not_null()
 
 
 class TopN(Filter):
-    """
-    A Filter selecting the top N assets by a factor's value on the most recent row.
-    
-    Parameters
-    ----------
-    term : Term
-        Factor-like term providing numeric values.
-    n : int
-        Number of assets to select.
-    ascending : bool
-        If True, select smallest values; if False, select largest values.
+    """Filter selecting top-N assets by a factor's most recent value.
+
+    :param term: Factor-like term providing numeric values.
+    :type term: Term
+    :param n: Number of assets to select.
+    :type n: int
+    :param ascending: If True, select smallest N; if False, select largest N.
+    :type ascending: bool
+    :raises ValueError: If ``n`` < 1.
+    :Example:
+        >>> mask = TopN(term=my_factor, n=100, ascending=False)
     """
     def __init__(self, term: Term, n: int, ascending: bool = False, mask: Filter | None = None):
         if n < 1:
@@ -188,35 +135,10 @@ class TopN(Filter):
         # Respect provided mask or term.mask by threading it into the Filter base via self.mask
         super().__init__(inputs=[term], window_length=term.window_length, mask=mask or getattr(term, 'mask', None))
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
+        """Return a boolean expression for top-N selection.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
-        Produce a boolean mask for top N selection on the most recent row.
-        """
-        # Extract the last row
-        row = data[-1] if getattr(data, "ndim", 1) > 1 else data
-
-        # Start with all False
-        out[:] = False
-
-        # Build candidate mask: finite values only
-        finite = np.isfinite(row)
-
-        # Apply term-level mask if present (must match length)
-        if self.mask is not None and hasattr(self.mask, 'latest_mask_values'):
-            # If engine supports computing mask separately, we'd pass it; since not available here,
-            # fall back to finite only. Engine-side will already filter by screen separately.
-            pass  # No-op: engine applies screen; intra-filter mask not computed here.
-
-        idx = np.where(finite)[0]
-        if idx.size == 0:
-            return
-
-        values = row[idx]
-
-        # Determine order for selection
-        order = np.argsort(values)  # ascending
-        if not self.ascending:
-            order = order[::-1]
-
-        take = idx[order[: min(self.n, idx.size)]]
-        out[take] = True
+        return self.term.to_expression().rank(descending=not self.ascending) <= self.n

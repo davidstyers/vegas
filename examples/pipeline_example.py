@@ -144,14 +144,14 @@ class Momentum(CustomFactor):
     inputs = ['close']
     window_length = 126  # Approximately 6 months of trading days
     
-    def compute(self, today, assets, out, closes):
+    def to_expression(self) -> pl.Expr:
         # Calculate returns over different periods
-        monthly_returns = (closes[-1] / closes[-21] - 1)  # 1-month return
-        quarterly_returns = (closes[-1] / closes[-63] - 1)  # 3-month return
-        biannual_returns = (closes[-1] / closes[-126] - 1)  # 6-month return
+        monthly_returns = pl.col('close').pct_change(n=21).over('symbol')
+        quarterly_returns = pl.col('close').pct_change(n=63).over('symbol')
+        biannual_returns = pl.col('close').pct_change(n=126).over('symbol')
         
         # Weight the returns (more weight to recent periods)
-        out[:] = 0.5 * monthly_returns + 0.3 * quarterly_returns + 0.2 * biannual_returns
+        return 0.5 * monthly_returns + 0.3 * quarterly_returns + 0.2 * biannual_returns
 
 def make_pipeline():
     """

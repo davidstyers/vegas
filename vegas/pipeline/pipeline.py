@@ -4,52 +4,51 @@ This module defines the Pipeline class that represents a collection of computati
 to be executed at the start of each trading day.
 """
 from typing import Dict, Optional, Any
-import pandas as pd
 
 
 class Pipeline:
+    """Container for computations evaluated once per trading day.
+
+    A `Pipeline` gathers columns defined by `Term` objects (Factors, Filters,
+    Classifiers) and an optional screen. The engine evaluates the pipeline over
+    historical data and returns a Polars DataFrame for the given date(s).
     """
-    A container for computations to be executed at the start of each trading day.
-    
-    A Pipeline represents a collection of computations (Factors, Filters, Classifiers)
-    that are executed together to produce a DataFrame of results.
-    """
-    def __init__(self, columns: Optional[Dict[str, Any]] = None, screen=None):
-        """
-        Initialize a pipeline with optional columns and screen.
-        
-        Parameters
-        ----------
-        columns : dict, optional
-            A dictionary mapping column names to terms (Factors, Filters, Classifiers)
-        screen : Filter, optional
-            A Filter representing assets to include in the computed Pipeline output
+    def __init__(self, columns: Optional[Dict[str, Any]] = None, screen=None, data_portal=None, frequency: str = '1h'):
+        """Initialize a pipeline definition.
+
+        :param columns: Mapping from result column name to `Term` (Factor/Filter/Classifier).
+        :type columns: Optional[Dict[str, Any]]
+        :param screen: Optional `Filter` to restrict the output universe.
+        :type screen: Optional[vegas.pipeline.terms.Filter]
+        :param data_portal: Optional `DataPortal` reference (not required for evaluation).
+        :type data_portal: Optional[Any]
+        :param frequency: Frequency string used for historical data (e.g., '1h', '1d').
+        :type frequency: str
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> from vegas.pipeline import Pipeline
+            >>> pipe = Pipeline(columns={"ret": my_factor}, screen=my_filter, frequency='1h')
         """
         self.columns = columns or {}
         self.screen = screen
+        self.data_portal = data_portal
+        self.frequency = frequency
         
     def add(self, term, name, overwrite=False):
-        """
-        Add a term to the pipeline.
-        
-        Parameters
-        ----------
-        term : Term
-            The term to add to the pipeline.
-        name : str
-            The name to assign to the term.
-        overwrite : bool, optional
-            Whether to overwrite an existing term with the same name.
-            
-        Returns
-        -------
-        self : Pipeline
-            The pipeline with the term added.
-            
-        Raises
-        ------
-        KeyError
-            If a term with the given name already exists and overwrite is False.
+        """Add a `Term` to the pipeline.
+
+        :param term: Term to add.
+        :type term: vegas.pipeline.terms.Term
+        :param name: Column name to assign to the computed term.
+        :type name: str
+        :param overwrite: If ``True``, replace an existing column with the same name.
+        :type overwrite: bool
+        :returns: Self, to allow fluent chaining.
+        :rtype: Pipeline
+        :raises KeyError: If the column already exists and ``overwrite`` is ``False``.
+        :Example:
+            >>> pipe.add(my_factor, name="momentum")
         """
         if name in self.columns and not overwrite:
             raise KeyError(f"Column '{name}' already exists. To overwrite, set overwrite=True.")
@@ -57,48 +56,32 @@ class Pipeline:
         return self
         
     def remove(self, name):
-        """
-        Remove a term from the pipeline.
-        
-        Parameters
-        ----------
-        name : str
-            The name of the term to remove.
-            
-        Returns
-        -------
-        term : Term
-            The removed term.
-            
-        Raises
-        ------
-        KeyError
-            If no term exists with the given name.
+        """Remove a column from the pipeline.
+
+        :param name: Name of the column to remove.
+        :type name: str
+        :returns: The removed `Term`.
+        :rtype: vegas.pipeline.terms.Term
+        :raises KeyError: If no such column exists.
+        :Example:
+            >>> removed = pipe.remove("momentum")
         """
         if name not in self.columns:
             raise KeyError(f"No column named '{name}' exists.")
         return self.columns.pop(name)
         
     def set_screen(self, screen, overwrite=False):
-        """
-        Set a screen on this Pipeline.
-        
-        Parameters
-        ----------
-        screen : Filter
-            The filter to apply as a screen.
-        overwrite : bool, optional
-            Whether to overwrite any existing screen.
-            
-        Returns
-        -------
-        self : Pipeline
-            The pipeline with the screen set.
-            
-        Raises
-        ------
-        ValueError
-            If a screen already exists and overwrite is False.
+        """Attach or replace the pipeline screen.
+
+        :param screen: Filter used to restrict output rows.
+        :type screen: vegas.pipeline.terms.Filter
+        :param overwrite: If ``True``, replace any existing screen.
+        :type overwrite: bool
+        :returns: Self, to allow fluent chaining.
+        :rtype: Pipeline
+        :raises ValueError: If a screen already exists and ``overwrite`` is ``False``.
+        :Example:
+            >>> pipe.set_screen(my_filter, overwrite=True)
         """
         if self.screen is not None and not overwrite:
             raise ValueError("Pipeline already has a screen. To overwrite, set overwrite=True.")

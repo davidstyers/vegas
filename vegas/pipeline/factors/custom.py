@@ -2,79 +2,71 @@
 
 This module defines the CustomFactor class that allows users to create their own factors.
 """
-from typing import List, Optional, Union, Any, Type, Dict
-import numpy as np
-import pandas as pd
 from vegas.pipeline.terms import Factor
+import polars as pl
 
 
 class CustomFactor(Factor):
-    """
-    Base class for user-defined Factors.
-    
-    CustomFactors allow users to easily define their own Factors
-    by implementing a compute method that operates on input data.
-    
-    Examples
-    --------
-    Define a simple moving average factor:
-    
-    >>> class SimpleMovingAverage(CustomFactor):
-    ...     def compute(self, today, assets, out, closes):
-    ...         out[:] = np.nanmean(closes, axis=0)
-    ...
-    >>> sma_10 = SimpleMovingAverage(inputs=['close'], window_length=10)
+    """Base class for user-defined numeric Factors.
+
+    Subclasses must implement `to_expression` to return a Polars expression.
+
+    Example:
+        >>> class SimpleMovingAverage(CustomFactor):
+        ...     inputs = ['close']
+        ...     window_length = 10
+        ...     def to_expression(self):
+        ...         return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
+        ...
+        >>> sma_10 = SimpleMovingAverage()
     """
     
     inputs = None
     window_length = None
     
-    def __new__(cls, *args, **kwargs):
-        """
-        Create and return a new factor instance.
-        
-        This method is used to handle class-specified default inputs and window_length.
-        """
-        inputs = kwargs.pop('inputs', None)
-        if inputs is None:
-            if cls.inputs is None:
-                raise ValueError(
-                    f"{cls.__name__} requires 'inputs' to be specified as a "
-                    "class attribute or parameter to __init__"
-                )
-            inputs = cls.inputs
-            
-        window_length = kwargs.pop('window_length', None)
-        if window_length is None:
-            if cls.window_length is None:
-                raise ValueError(
-                    f"{cls.__name__} requires 'window_length' to be specified as a "
-                    "class attribute or parameter to __init__"
-                )
-            window_length = cls.window_length
-            
-        return super().__new__(cls)
-    
     def __init__(self, inputs=None, window_length=None, mask=None, **kwargs):
+        """Initialize a `CustomFactor`.
+
+        :param inputs: Input column names or `Term` objects.
+        :type inputs: list | None
+        :param window_length: Number of rows included in the window.
+        :type window_length: int | None
+        :param mask: Optional mask defining the computation universe.
+        :type mask: Optional[vegas.pipeline.terms.Filter]
+        :param kwargs: Additional attributes to set on the instance.
+        :type kwargs: dict
+        :raises ValueError: If subclass fails to supply required `inputs` or `window_length`.
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> cf = CustomFactor(inputs=['close'], window_length=5)
         """
-        Initialize a CustomFactor.
-        
-        Parameters
-        ----------
-        inputs : list, optional
-            A list of data inputs to use in compute.
-        window_length : int, optional
-            The number of rows of data to pass to compute.
-        mask : Filter, optional
-            A Filter defining values to compute.
-        **kwargs
-            Additional keyword arguments.
-        """
-        # These have already been handled in __new__, so just pass to parent constructor
-        inputs = inputs if inputs is not None else self.inputs
-        window_length = window_length if window_length is not None else self.window_length
+        if inputs is None:
+            if self.inputs is None:
+                raise ValueError(
+                    f"{type(self).__name__} requires 'inputs' to be specified as a "
+                    "class attribute or parameter to __init__"
+                )
+            inputs = self.inputs
+            
+        if window_length is None:
+            if self.window_length is None:
+                raise ValueError(
+                    f"{type(self).__name__} requires 'window_length' to be specified as a "
+                    "class attribute or parameter to __init__"
+                )
+            window_length = self.window_length
         
         super().__init__(inputs=inputs, window_length=window_length, mask=mask)
         
         for k, v in kwargs.items():
-            setattr(self, k, v) 
+            setattr(self, k, v)
+
+    def to_expression(self) -> pl.Expr:
+        """Return the Polars expression implementing the factor.
+
+        :returns: Polars expression to be evaluated by the pipeline engine.
+        :rtype: pl.Expr
+        :raises NotImplementedError: Must be implemented by subclasses.
+        """
+        raise NotImplementedError("CustomFactor subclasses must implement to_expression")

@@ -17,12 +17,24 @@ import matplotlib.pyplot as plt
 from tabulate import tabulate
 
 from vegas.engine import BacktestEngine
+from vegas.calendars import get_calendar
 from vegas.strategy import Strategy
 from vegas.data import DataLayer
 
 
 def load_strategy_from_file(file_path):
-    """Load a strategy class from a Python file."""
+    """Load a `Strategy` subclass from a Python file path.
+
+    :param file_path: Path to a Python module defining a `Strategy` subclass.
+    :type file_path: str | os.PathLike
+    :returns: The first discovered `Strategy` subclass in the module.
+    :rtype: type[Strategy]
+    :raises FileNotFoundError: If the file does not exist.
+    :raises ImportError: If the module cannot be imported or loaded.
+    :raises ValueError: If no `Strategy` subclass is found.
+    :Example:
+        >>> StrategyClass = load_strategy_from_file('my_strategy.py')
+    """
     file_path = Path(file_path).resolve()
     if not file_path.exists():
         raise FileNotFoundError(f"Strategy file not found: {file_path}")
@@ -55,7 +67,14 @@ def load_strategy_from_file(file_path):
 
 
 def parse_date(date_str):
-    """Parse date string in YYYY-MM-DD format."""
+    """Parse a date in `YYYY-MM-DD` format into a `datetime`.
+
+    :param date_str: Date string or ``None``.
+    :type date_str: Optional[str]
+    :returns: Parsed `datetime` or ``None`` if not provided.
+    :rtype: Optional[datetime]
+    :raises argparse.ArgumentTypeError: If the format is invalid.
+    """
     if not date_str:
         return None
     try:
@@ -65,7 +84,13 @@ def parse_date(date_str):
 
 
 def run_backtest(args):
-    """Run a backtest with the specified arguments."""
+    """Run a backtest using arguments from the CLI parser.
+
+    :param args: Parsed arguments namespace.
+    :type args: argparse.Namespace
+    :returns: Process exit code (0 on success, non-zero on failure).
+    :rtype: int
+    """
     # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
@@ -77,18 +102,14 @@ def run_backtest(args):
         # Initialize engine
         engine = BacktestEngine(timezone=args.timezone)
         
-        # Configure trading hours if provided
-        if hasattr(args, 'market') or hasattr(args, 'market_open') or hasattr(args, 'market_close'):
-            market = getattr(args, 'market', "US")
-            market_open = getattr(args, 'market_open', "09:30")
-            market_close = getattr(args, 'market_close', "16:00")
-            engine.set_trading_hours(market, market_open, market_close)
-            logger.info(f"Configured trading hours: {market_open} to {market_close} for {market} market")
-        
-        # Configure extended hours handling
-        if hasattr(args, 'regular_hours_only') and args.regular_hours_only:
-            engine.ignore_extended_hours(True)
-            logger.info("Extended hours data will be ignored")
+        # Configure simulation calendar (mandatory)
+        engine._calendar_name = args.calendar
+        try:
+            # Validate early
+            get_calendar(args.calendar)
+        except Exception as e:
+            logger.error(f"Invalid calendar '{args.calendar}': {e}")
+            return 1
         
         # Load data
         load_data(engine, args, logger)
@@ -103,19 +124,74 @@ def run_backtest(args):
         
         logger.info(f"Running backtest from {start_date.date()} to {end_date.date()} in timezone {args.timezone}")
         
-        # Run backtest
+        # Run backtest or live depending on mode
         strategy = strategy_class()
-        results = engine.run(
-            start=start_date,
-            end=end_date,
-            strategy=strategy,
-            initial_capital=args.capital
-        )
+        if getattr(args, "mode", "backtest") == "live":
+            # Live mode plumbing only; no external adapters constructed here per scope.
+            results = engine.run_live(
+                start=start_date,
+                end=end_date,
+                strategy=strategy,
+                feed=None,
+                broker=None
+            )
+        else:
+            results = engine.run(
+                start=start_date,
+                end=end_date,
+                strategy=strategy,
+                initial_capital=args.capital
+            )
         # Print results
         print_results(results, strategy_class.__name__, logger)
         
         # Generate outputs if requested
         generate_outputs(results, strategy_class.__name__, args)
+        
+        # Dump positions ledger if requested (kept here per original placement)
+        if hasattr(args, 'dump_positions') and args.dump_positions is not None:
+            try:
+                df = engine.dump_positions_ledger()
+            except Exception as e:
+                logger.error(f"dump_positions_ledger failed: {e}")
+                df = pl.DataFrame()
+
+            # Prepare tabulate output with ISO timestamps
+            if isinstance(df, pl.DataFrame) and df.height > 0:
+                disp = df
+                if "pos_open_ts" in disp.columns:
+                    disp = disp.with_columns(pl.col("pos_open_ts").map_elements(lambda x: x.isoformat() if x is not None else "", return_dtype=pl.Utf8))
+                if "pos_close_ts" in disp.columns:
+                    disp = disp.with_columns(pl.col("pos_close_ts").map_elements(lambda x: x.isoformat() if x is not None else "", return_dtype=pl.Utf8))
+                headers = disp.columns
+                rows = [[row.get(col) for col in headers] for row in disp.to_dicts()]
+                table = tabulate(rows, headers=headers, tablefmt="fancy_grid", floatfmt=".4f")
+                print("\nPositions Ledger:\n" + table)
+            else:
+                print("\nPositions Ledger:\n(empty)")
+
+            # Determine CSV path behavior
+            path_arg = args.dump_positions
+            if path_arg == "__DEFAULT__":
+                csv_path = "./positions_ledger.csv"
+            elif isinstance(path_arg, str):
+                csv_path = path_arg
+            else:
+                csv_path = None
+
+            # Write CSV if a path was provided (explicitly or default sentinel)
+            if csv_path:
+                try:
+                    df_out = df.clone() if isinstance(df, pl.DataFrame) else pl.DataFrame()
+                    if isinstance(df_out, pl.DataFrame) and df_out.height > 0:
+                        if "pos_open_ts" in df_out.columns:
+                            df_out = df_out.with_columns(pl.col("pos_open_ts").cast(pl.Utf8))
+                        if "pos_close_ts" in df_out.columns:
+                            df_out = df_out.with_columns(pl.col("pos_close_ts").cast(pl.Utf8))
+                    df_out.write_csv(csv_path)
+                    logger.info(f"Positions ledger CSV written to {csv_path}")
+                except Exception as e:
+                    logger.error(f"Failed to write positions ledger CSV: {e}")
         
         return 0
     finally:
@@ -123,7 +199,13 @@ def run_backtest(args):
 
 
 def load_data(engine, args, logger):
-    """Load data into the engine based on CLI arguments."""
+    """Load data into the engine based on CLI arguments.
+
+    Priority:
+      1) --data-file
+      2) --data-dir (with optional --file-pattern)
+      3) Already loaded/ingested data via `DataLayer`
+    """
     try:
         if args.data_file:
             logger.info(f"Loading data from file: {args.data_file}")
@@ -143,7 +225,17 @@ def load_data(engine, args, logger):
 
 
 def print_results(results, strategy_name, logger):
-    """Print backtest results to the console."""
+    """Print a compact, tabulated summary of backtest results to stdout.
+
+    :param results: Results dictionary returned by the engine.
+    :type results: Dict[str, Any]
+    :param strategy_name: Name of the executed strategy.
+    :type strategy_name: str
+    :param logger: Logger instance for CLI.
+    :type logger: logging.Logger
+    :returns: None
+    :rtype: None
+    """
     stats = results['stats']
     rows = [[k, v] for k, v in results['stats'].items()]
     logger.info(
@@ -160,7 +252,11 @@ def print_results(results, strategy_name, logger):
 
 
 def generate_outputs(results, strategy_name, args):
-    """Generate output files based on CLI arguments."""
+    """Generate artifacts (plot, CSV, report) based on CLI arguments.
+
+    Produces an equity curve plot, exports CSV, and optionally generates a
+    QuantStats HTML report when requested.
+    """
     logger = logging.getLogger('vegas.cli')
     equity_curve = results['equity_curve']
     
@@ -186,7 +282,14 @@ def generate_outputs(results, strategy_name, args):
 
 
 def generate_quantstats_report(results, strategy_name, report_path, benchmark, logger):
-    """Generate a QuantStats performance report."""
+    """Generate a QuantStats performance report.
+
+    :param results: Engine results dictionary.
+    :param strategy_name: Strategy class name.
+    :param report_path: Output path for report HTML.
+    :param benchmark: Optional benchmark symbol.
+    :param logger: Logger instance.
+    """
     try:
         import quantstats as qs
         import pandas as pd
@@ -244,7 +347,12 @@ def generate_quantstats_report(results, strategy_name, report_path, benchmark, l
 
 
 def prepare_returns_for_quantstats(returns: pl.Series, logger):
-    """Prepare returns data for QuantStats report generation using Polars Series."""
+    """Prepare returns DataFrame for QuantStats report generation.
+
+    Ensures daily sampling when intraday timestamps are present and returns a
+    DataFrame with at least `date` and `daily_return_pct` columns suitable for
+    conversion to pandas.
+    """
 
     if returns.height <= 1:
         return returns
@@ -303,7 +411,11 @@ def prepare_returns_for_quantstats(returns: pl.Series, logger):
 
 
 def ingest_data(args):
-    """Ingest data into the database."""
+    """Ingest CSV data into the database based on CLI arguments.
+
+    :returns: Exit code integer (0 on success).
+    :rtype: int
+    """
     # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
@@ -359,7 +471,11 @@ def ingest_data(args):
 
 
 def ingest_ohlcv(args):
-    """Ingest OHLCV data into the database."""
+    """Ingest .ohlcv-1h.csv.zst OHLCV files into the database.
+
+    :returns: Exit code integer (0 on success).
+    :rtype: int
+    """
     # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
@@ -420,13 +536,17 @@ def ingest_ohlcv(args):
 
 
 def db_status(args):
-    """Display database status."""
+    """Display database status and basic statistics.
+
+    :returns: Exit code integer (0 on success).
+    :rtype: int
+    """
     
     return db_status_internal(args)
 
 
 def db_status_internal(args):
-    """Internal implementation of database status command."""
+    """Internal helper that implements `db-status` CLI command."""
     logger = logging.getLogger('vegas.cli')
     
     # Ensure detailed attribute exists with default value
@@ -489,7 +609,11 @@ def db_status_internal(args):
 
 
 def db_query(args):
-    """Execute a SQL query on the database."""
+    """Execute a SQL query and print or export the results.
+
+    :returns: Exit code integer (0 on success).
+    :rtype: int
+    """
     # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
@@ -552,7 +676,10 @@ def db_query(args):
 
 
 def delete_db(args):
-    """Delete the database file."""
+    """Delete the DuckDB file and associated WAL if present.
+
+    Prompts for confirmation unless `--force` is provided.
+    """
     # Get logger for CLI
     logger = logging.getLogger('vegas.cli')
     
@@ -590,7 +717,7 @@ def delete_db(args):
 
 
 def main():
-    """Main entry point for the CLI."""
+    """CLI entry point configuring subcommands and dispatching execution."""
     # Create the top-level parser
     parser = argparse.ArgumentParser(description='Vegas Backtesting Engine CLI')
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
@@ -614,11 +741,19 @@ def main():
     run_parser.add_argument('--results-csv', type=str, help='Save results to CSV file')
     run_parser.add_argument('--report', type=str, help='Generate QuantStats report')
     run_parser.add_argument('--benchmark', type=str, help='Benchmark symbol for report')
-    # Add new trading hours options
-    run_parser.add_argument('--market', type=str, help='Market name (e.g., NYSE, NASDAQ)')
-    run_parser.add_argument('--market-open', type=str, help='Market open time (HH:MM) in 24h format')
-    run_parser.add_argument('--market-close', type=str, help='Market close time (HH:MM) in 24h format')
-    run_parser.add_argument('--regular-hours-only', action='store_true', help='Only use data from regular market hours')
+    # Simulation calendar (mandatory)
+    run_parser.add_argument('--calendar', type=str, default='24/7', help='Trading calendar name (e.g., NYSE, 24/7)')
+    # New mode flag (backtest by default). Live will route to engine.run_live but no external adapters are constructed.
+    run_parser.add_argument('--mode', type=str, choices=['backtest', 'live'], default='backtest', help='Execution mode')
+
+    # Positions dump flag: optional path argument; prints table in all cases
+    run_parser.add_argument(
+        '--dump-positions',
+        nargs='?',
+        const='__DEFAULT__',
+        help='Dump all positions (open and closed) at end of run. Optional path to write CSV'
+    )
+
     run_parser.set_defaults(func=run_backtest)
     
     # Ingest command

@@ -1,7 +1,7 @@
-"""Tests for the Strategy class."""
+"""Tests for the Strategy class (Polars-only, API-aligned)."""
 
 import pytest
-import pandas as pd
+import polars as pl
 import numpy as np
 from datetime import datetime
 
@@ -22,9 +22,9 @@ class TestStrategy(Strategy):
         # Generate a signal for the first symbol in the data
         if data:
             symbol = next(iter(data.keys()))
+            # vegas Signal API uses quantity sign to encode side; omit 'action'
             signals.append(Signal(
                 symbol=symbol,
-                action='buy',
                 quantity=100
             ))
             
@@ -41,14 +41,14 @@ def test_strategy_initialization():
 
 
 def test_signal_generation():
-    """Test signal generation."""
+    """Test signal generation with Polars input."""
     strategy = TestStrategy()
     context = Context()
     strategy.initialize(context)
     
-    # Create test data
+    # Create test data (Polars)
     data = {
-        'AAPL': pd.DataFrame({
+        'AAPL': pl.DataFrame({
             'timestamp': [datetime.now()],
             'open': [150.0],
             'high': [155.0],
@@ -62,7 +62,6 @@ def test_signal_generation():
     
     assert len(signals) == 1
     assert signals[0].symbol == 'AAPL'
-    assert signals[0].action == 'buy'
     assert signals[0].quantity == 100
 
 
@@ -72,9 +71,9 @@ def test_before_trading_start():
     context = Context()
     strategy.initialize(context)
     
-    # Create test data
+    # Create test data (Polars)
     data = {
-        'AAPL': pd.DataFrame({
+        'AAPL': pl.DataFrame({
             'timestamp': [datetime.now()],
             'open': [150.0],
             'high': [155.0],
@@ -85,4 +84,4 @@ def test_before_trading_start():
     }
     
     # Method should not raise an exception
-    strategy.before_trading_start(context, data) 
+    strategy.before_trading_start(context, data)

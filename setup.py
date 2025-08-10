@@ -21,6 +21,15 @@ setup(
         "pyarrow>=14.0.0",    # For Parquet support
         "pytz>=2023.3.0",     # For timezone support
     ],
+    extras_require={
+        "ibkr": [
+            "ibapi>=9.81.1",
+        ],
+        "dev": [
+            "pytest>=8.0.0",
+            "pytest-cov>=5.0.0",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "vegas=vegas.cli.main:main",
