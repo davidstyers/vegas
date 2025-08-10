@@ -2,7 +2,7 @@
 
 This module defines more complex filters like All, Any, and AtLeastN.
 """
-import numpy as np
+import polars as pl
 from vegas.pipeline.terms import Filter, Term
 
 
@@ -21,27 +21,14 @@ class All(Filter):
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """
         Compute the logical AND of all input filters.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
         """
-        # Start with all True
-        out[:] = True
-        
-        # Logical AND with each input
-        for i in range(len(inputs)):
-            out &= inputs[i]
+        expr = self.filters[0].to_expression()
+        for f in self.filters[1:]:
+            expr = expr & f.to_expression()
+        return expr
 
 
 class Any(Filter):
@@ -59,27 +46,14 @@ class Any(Filter):
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """
         Compute the logical OR of all input filters.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
         """
-        # Start with all False
-        out[:] = False
-        
-        # Logical OR with each input
-        for i in range(len(inputs)):
-            out |= inputs[i]
+        expr = self.filters[0].to_expression()
+        for f in self.filters[1:]:
+            expr = expr | f.to_expression()
+        return expr
 
 
 class AtLeastN(Filter):
@@ -106,28 +80,11 @@ class AtLeastN(Filter):
         
         super().__init__(inputs=list(filters), window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """
         Compute whether at least N of the input filters are True.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from the filters
         """
-        # Count how many filters are True for each asset
-        count = np.zeros_like(out, dtype=int)
-        for i in range(len(inputs)):
-            count += inputs[i]
-        
-        # Check if count reaches the threshold
-        out[:] = count >= self.n
+        return pl.sum_horizontal([f.to_expression() for f in self.filters]) >= self.n
 
 
 class NotMissing(Filter):
@@ -144,26 +101,11 @@ class NotMissing(Filter):
         self.term = term
         super().__init__(inputs=[term], window_length=term.window_length)
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Identify assets with non-missing data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        data : np.array
-            Data to check for missing values
         """
-        # Check if any value in the last row is missing
-        if data.ndim > 1:
-            out[:] = ~np.isnan(data[-1])
-        else:
-            out[:] = ~np.isnan(data)
+        return self.term.to_expression().is_not_null()
 
 
 class TopN(Filter):
@@ -188,35 +130,8 @@ class TopN(Filter):
         # Respect provided mask or term.mask by threading it into the Filter base via self.mask
         super().__init__(inputs=[term], window_length=term.window_length, mask=mask or getattr(term, 'mask', None))
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Produce a boolean mask for top N selection on the most recent row.
         """
-        # Extract the last row
-        row = data[-1] if getattr(data, "ndim", 1) > 1 else data
-
-        # Start with all False
-        out[:] = False
-
-        # Build candidate mask: finite values only
-        finite = np.isfinite(row)
-
-        # Apply term-level mask if present (must match length)
-        if self.mask is not None and hasattr(self.mask, 'latest_mask_values'):
-            # If engine supports computing mask separately, we'd pass it; since not available here,
-            # fall back to finite only. Engine-side will already filter by screen separately.
-            pass  # No-op: engine applies screen; intra-filter mask not computed here.
-
-        idx = np.where(finite)[0]
-        if idx.size == 0:
-            return
-
-        values = row[idx]
-
-        # Determine order for selection
-        order = np.argsort(values)  # ascending
-        if not self.ascending:
-            order = order[::-1]
-
-        take = idx[order[: min(self.n, idx.size)]]
-        out[take] = True
+        return self.term.to_expression().rank(descending=not self.ascending) <= self.n

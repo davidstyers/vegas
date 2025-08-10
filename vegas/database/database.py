@@ -813,50 +813,88 @@ class DatabaseManager:
             self.logger.error(f"Failed to get available symbols: {e}")
             return pl.DataFrame(schema={'symbol': pl.Utf8, 'record_count': pl.Int64})
     
-    def get_market_data(self, start_date: datetime = None, end_date: datetime = None, 
-                      symbols: List[str] = None, timezone: str = "UTC") -> pl.DataFrame:
+    def get_market_data(self, start_date: datetime = None, end_date: datetime = None,
+                      symbols: List[str] = None, timezone: str = "UTC",
+                      bar_count: int = None) -> pl.DataFrame:
         """Query market data from the database.
         
         Args:
             start_date: Optional start date filter
             end_date: Optional end date filter
             symbols: Optional list of symbols to filter by
+            timezone: Optional timezone for timestamp columns
+            bar_count: Optional number of bars to retrieve per symbol before end_date
             
         Returns:
             DataFrame with market data
         """
         try:
-            query = "SELECT * FROM market_data"
-            conditions = []
-            params = []
-            
-            if start_date:
-                conditions.append("timestamp >= ?")
-                params.append(start_date)
+            if bar_count is not None:
+                if end_date is None:
+                    raise ValueError("end_date must be specified when using bar_count")
+
+                conditions = ["timestamp <= ?"]
+                params = [end_date]
+
+                if symbols:
+                    if len(symbols) <= 20:
+                        assets_str = ", ".join([f"'{s}'" for s in symbols])
+                        conditions.append(f"symbol IN ({assets_str})")
+                    else:
+                        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_hist_symbols (symbol VARCHAR)")
+                        self.conn.execute("DELETE FROM temp_hist_symbols")
+                        self.conn.executemany("INSERT INTO temp_hist_symbols VALUES (?)", [(s,) for s in symbols])
+                        conditions.append("symbol IN (SELECT symbol FROM temp_hist_symbols)")
+
+                where_str = " AND ".join(conditions)
+
+                query = f"""
+                WITH ranked_data AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
+                    FROM market_data
+                    WHERE {where_str}
+                )
+                SELECT *
+                FROM ranked_data
+                WHERE rn <= ?
+                ORDER BY timestamp ASC, symbol
+                """
                 
-            if end_date:
-                conditions.append("timestamp <= ?")
-                params.append(end_date)
+                final_params = tuple(params + [bar_count])
+                return self.query_to_df(query, final_params, timezone=timezone)
+
+            else:
+                query = "SELECT * FROM market_data"
+                conditions = []
+                params = []
                 
-            if symbols and len(symbols) > 0:
-                # For better performance with many symbols, use IN clause
-                if len(symbols) <= 10:
-                    symbols_list = ", ".join([f"'{s}'" for s in symbols])
-                    conditions.append(f"symbol IN ({symbols_list})")
-                else:
-                    # For many symbols, create a temporary table and join
-                    self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_symbols (symbol VARCHAR)")
-                    self.conn.execute("DELETE FROM temp_symbols")
-                    for symbol in symbols:
-                        self.conn.execute("INSERT INTO temp_symbols VALUES (?)", (symbol,))
-                    conditions.append("symbol IN (SELECT symbol FROM temp_symbols)")
-            
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
+                if start_date:
+                    conditions.append("timestamp >= ?")
+                    params.append(start_date)
+                    
+                if end_date:
+                    conditions.append("timestamp <= ?")
+                    params.append(end_date)
+                    
+                if symbols and len(symbols) > 0:
+                    if len(symbols) <= 10:
+                        symbols_list = ", ".join([f"'{s}'" for s in symbols])
+                        conditions.append(f"symbol IN ({symbols_list})")
+                    else:
+                        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS temp_symbols (symbol VARCHAR)")
+                        self.conn.execute("DELETE FROM temp_symbols")
+                        for symbol in symbols:
+                            self.conn.execute("INSERT INTO temp_symbols VALUES (?)", (symbol,))
+                        conditions.append("symbol IN (SELECT symbol FROM temp_symbols)")
                 
-            query += " ORDER BY timestamp, symbol"
-            
-            return self.query_to_df(query, tuple(params), timezone=timezone)
+                if conditions:
+                    query += " WHERE " + " AND ".join(conditions)
+                    
+                query += " ORDER BY timestamp, symbol"
+                
+                return self.query_to_df(query, tuple(params), timezone=timezone)
             
         except Exception as e:
             self.logger.error(f"Failed to get market data: {e}")
@@ -864,17 +902,17 @@ class DatabaseManager:
 
     def get_unified_timestamps(self, start_date: datetime, end_date: datetime, timezone: str = "UTC") -> pl.Series:
         """Return a unified, unique, sorted list of timestamps across all known data tables.
-
+ 
         Currently, this queries the canonical `market_data` view which already
         unions all ingested sources. If additional tables (trades, quotes, orderbook)
         are introduced later, this method should be updated to UNION DISTINCT their
         timestamps as well.
-
+ 
         Args:
             start_date: inclusive lower bound
             end_date: inclusive upper bound
             timezone: target timezone for the returned timestamps
-
+ 
         Returns:
             pl.Series of dtype pl.Datetime with timezone, sorted ascending, unique.
         """
@@ -891,12 +929,12 @@ class DatabaseManager:
             )
             if df.is_empty() or "timestamp" not in df.columns:
                 return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=timezone))
-
+ 
             # Ensure we have timezone on the column
             ts_col = df.get_column("timestamp")
             if ts_col.dtype != pl.Datetime or (hasattr(ts_col.dtype, "time_zone") and ts_col.dtype.time_zone != timezone):
                 df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=timezone)))
-
+ 
             # Return as a Series unique & sorted (already sorted by query)
             return df.get_column("timestamp")
         except Exception as e:

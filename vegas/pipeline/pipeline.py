@@ -4,7 +4,6 @@ This module defines the Pipeline class that represents a collection of computati
 to be executed at the start of each trading day.
 """
 from typing import Dict, Optional, Any
-import pandas as pd
 
 
 class Pipeline:
@@ -14,7 +13,7 @@ class Pipeline:
     A Pipeline represents a collection of computations (Factors, Filters, Classifiers)
     that are executed together to produce a DataFrame of results.
     """
-    def __init__(self, columns: Optional[Dict[str, Any]] = None, screen=None):
+    def __init__(self, columns: Optional[Dict[str, Any]] = None, screen=None, data_portal=None, frequency='1h'):
         """
         Initialize a pipeline with optional columns and screen.
         
@@ -24,9 +23,15 @@ class Pipeline:
             A dictionary mapping column names to terms (Factors, Filters, Classifiers)
         screen : Filter, optional
             A Filter representing assets to include in the computed Pipeline output
+        data_portal : DataPortal, optional
+            The data portal to use for fetching data
+        frequency : str, optional
+            The frequency of the data to fetch
         """
         self.columns = columns or {}
         self.screen = screen
+        self.data_portal = data_portal
+        self.frequency = frequency
         
     def add(self, term, name, overwrite=False):
         """

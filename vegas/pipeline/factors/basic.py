@@ -2,8 +2,7 @@
 
 This module defines common basic factors like Returns and moving averages.
 """
-import numpy as np
-import pandas as pd
+import polars as pl
 from vegas.pipeline.factors.custom import CustomFactor
 
 
@@ -14,31 +13,11 @@ class Returns(CustomFactor):
     inputs = ['close']
     window_length = 2  # Default to daily returns
     
-    def compute(self, today, assets, out, closes):
+    def to_expression(self) -> pl.Expr:
         """
         Calculate returns from price data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        closes : np.array
-            Price data arrays to compute returns from
         """
-        try:
-            # Ensure data is the right shape
-            if closes.ndim == 1:
-                closes = closes.reshape(-1, 1)
-            
-            # Calculate returns
-            out[:] = (closes[-1] - closes[0]) / closes[0]
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).pct_change(n=self.window_length - 1).over('symbol')
 
 
 class SimpleMovingAverage(CustomFactor):
@@ -54,37 +33,11 @@ class SimpleMovingAverage(CustomFactor):
     inputs = ['close']  # Default to close prices
     window_length = 10  # Default to 10-day moving average
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Calculate simple moving average.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute moving average from
         """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-
-            # Guard against empty/NaN-only windows to avoid RuntimeWarnings
-            valid_counts = np.sum(~np.isnan(data), axis=0)
-            out[:] = np.nan  # default
-            has_data = valid_counts > 0
-            if np.any(has_data):
-                with np.errstate(invalid="ignore"):
-                    means = np.nanmean(data[:, has_data], axis=0)
-                out[has_data] = means
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
 
 
 class ExponentialWeightedMovingAverage(CustomFactor):
@@ -108,49 +61,11 @@ class ExponentialWeightedMovingAverage(CustomFactor):
         self.decay_rate = decay_rate
         super().__init__(inputs=inputs, window_length=window_length, mask=mask)
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Calculate exponentially-weighted moving average.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute moving average from
         """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-
-            # Create weights that exponentially decay based on the provided rate
-            weights = np.power(self.decay_rate, np.arange(self.window_length - 1, -1, -1))
-
-            # Normalize weights to sum to 1
-            wsum = np.sum(weights)
-            if not np.isfinite(wsum) or wsum == 0:
-                out[:] = np.nan
-                return
-            weights = weights / wsum
-
-            # Weighted average (handle NaNs by masking and renormalizing weights)
-            mask = ~np.isnan(data)
-            out[:] = np.nan
-            if mask.any():
-                # For each asset, compute the effective sum of weights over valid entries
-                eff_w = np.sum(weights.reshape(-1, 1) * mask, axis=0)
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    num = np.nansum((data * weights.reshape(-1, 1)), axis=0)
-                    valid = eff_w > 0
-                    out[valid] = num[valid] / eff_w[valid]
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).ewm_mean(alpha=self.decay_rate, adjust=False).over('symbol')
 
 
 class VWAP(CustomFactor):
@@ -163,45 +78,11 @@ class VWAP(CustomFactor):
     inputs = ['close', 'volume']
     window_length = 1  # Default to single day VWAP
     
-    def compute(self, today, assets, out, closes, volumes):
+    def to_expression(self) -> pl.Expr:
         """
         Calculate VWAP from price and volume data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        closes : np.array
-            Price data
-        volumes : np.array
-            Volume data
         """
-        try:
-            # Ensure data is the right shape
-            if closes.ndim == 1:
-                closes = closes.reshape(-1, 1)
-            if volumes.ndim == 1:
-                volumes = volumes.reshape(-1, 1)
-                
-            # Calculate the product of price and volume
-            value_traded = closes * volumes
-            
-            # Calculate VWAP
-            with np.errstate(divide='ignore', invalid='ignore'):  # Ignore divide by zero warnings
-                out[:] = np.nansum(value_traded, axis=0) / np.nansum(volumes, axis=0)
-            
-            # Replace any NaNs or infinities with the simple average price
-            invalid_mask = ~np.isfinite(out)
-            if np.any(invalid_mask):
-                # For assets with zero volume, use the simple average price
-                out[invalid_mask] = np.nanmean(closes[:, invalid_mask], axis=0)
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return (pl.col('close') * pl.col('volume')).sum().over('symbol') / pl.col('volume').sum().over('symbol')
 
 
 class StandardDeviation(CustomFactor):
@@ -211,35 +92,8 @@ class StandardDeviation(CustomFactor):
     inputs = ['close']  # Default to close prices
     window_length = 10  # Default to 10-day window
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Calculate standard deviation.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Data to compute standard deviation from
         """
-        try:
-            # Ensure data is the right shape
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-
-            # Guard degrees of freedom issues: default ddof=0 for population std
-            # Only compute for columns with at least 1 finite observation
-            valid_counts = np.sum(~np.isnan(data), axis=0)
-            out[:] = np.nan
-            has_enough = valid_counts > 0
-            if np.any(has_enough):
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    stds = np.nanstd(data[:, has_enough], axis=0, ddof=0)
-                out[has_enough] = stds
-        except Exception as e:
-            # If calculation fails, fill with NaN
-            out[:] = np.nan
+        return pl.col(self.inputs[0]).rolling_std(self.window_length).over('symbol')

@@ -21,22 +21,6 @@ class BacktestEngine:
     This engine provides streamlined backtesting capabilities by directly
     processing market data chronologically without a separate events system.
     """
-
-    def dump_positions_ledger(self) -> pl.DataFrame:
-        """
-        Build and return the complete positions ledger (open and closed) as a Polars DataFrame.
-
-        Delegates to the portfolio to reconstruct positions from recorded events/transactions.
-        Returns an empty DataFrame if the portfolio is not initialized.
-        """
-        try:
-            if self.portfolio is None:
-                return pl.DataFrame()
-            # Portfolio provides latest price lookup internally when None
-            return self.portfolio.build_positions_ledger(latest_price_lookup=None)
-        except Exception:
-            # Fail-safe: never raise from dump; return empty DF to keep CLI resilient
-            return pl.DataFrame()
     
     def __init__(self, data_dir: str = "db", timezone: str = "UTC"):
         """Initialize the backtest engine.
@@ -62,8 +46,8 @@ class BacktestEngine:
         self._market_name = "US"  # Default market name
         self._ignore_extended_hours = False  # By default, use all data
         
-        # Add pipeline engine
-        self.pipeline_engine = PipelineEngine(self.data_layer)
+        # Add pipeline
+        self.pipeline_engine = PipelineEngine(self.data_portal)
         self.attached_pipelines = {}
         self._pipeline_results = {}
     
@@ -233,19 +217,9 @@ class BacktestEngine:
         
         # Initialize strategy and portfolio
         self.strategy = strategy
-        self.portfolio = Portfolio(initial_capital=initial_capital)
-        # Provide DataPortal to portfolio for price lookups
-        try:
-            self.portfolio.set_data_portal(self.data_portal)
-        except Exception:
-            pass
-        self.broker = Broker(initial_cash=initial_capital)
-        try:
-            # Provide DataPortal to broker for any internal data fetches
-            if hasattr(self.broker, 'set_data_portal'):
-                self.broker.set_data_portal(self.data_portal)
-        except Exception:
-            pass
+
+        self.portfolio = Portfolio(initial_capital=initial_capital, data_portal=self.data_portal)
+        self.broker = Broker(initial_cash=initial_capital, data_portal=self.data_portal)
         
         # Get context and initialize strategy
         context = self.strategy.context
@@ -277,8 +251,8 @@ class BacktestEngine:
         if self._ignore_extended_hours:
             market_hours = (self._market_open_time, self._market_close_time)
 
-        # Build unified simulation timestamp index from the data layer (single source of truth)
-        timestamp_index = self.data_layer.get_unified_timestamp_index(start, end)
+        # Acquire and prepare market data; build simulation timestamp index
+        timestamp_index = self._prepare_market_data(start, end)
 
         # Run the backtest
         self._logger.info("Executing backtest")
@@ -295,6 +269,65 @@ class BacktestEngine:
         self.strategy.analyze(context, results_dict)
         
         return results_dict
+
+    def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
+        """Load and prepare market data for the backtest and return the timestamp index.
+
+        - Determines strategy universe (if provided on the strategy)
+        - Computes earliest preload start using attached pipeline window requirements
+        - Preloads all required frequencies into the DataPortal
+        - Returns the unified simulation timestamp index from the cache
+        """
+        # Determine strategy universe, if exposed
+        try:
+            strategy_universe = None
+            for attr in ("universe", "assets", "symbols"):
+                if hasattr(self.strategy, attr):
+                    val = getattr(self.strategy, attr)
+                    if isinstance(val, (list, tuple, set)) and len(val) > 0:
+                        strategy_universe = list(val)
+                        break
+                    if isinstance(val, str) and val:
+                        strategy_universe = [val]
+                        break
+        except Exception:
+            strategy_universe = None
+
+        # Frequencies to materialize
+        freq_set = {"1h"}
+        preload_start = start
+        try:
+            for p in getattr(self, "attached_pipelines", {}).values():
+                f = getattr(p, "frequency", None)
+                if isinstance(f, str) and f:
+                    freq_set.add(f)
+                try:
+                    max_window = self.pipeline_engine._get_max_window_length(p)
+                except Exception:
+                    max_window = 0
+                if max_window and max_window > 0:
+                    if f == "1d":
+                        candidate = start - timedelta(days=int(max_window))
+                    elif f == "1h":
+                        candidate = start - timedelta(hours=int(max_window))
+                    else:
+                        candidate = start - timedelta(hours=int(max_window))
+                    if candidate < preload_start:
+                        preload_start = candidate
+        except Exception:
+            pass
+
+        # Preload the DataPortal cache
+        self.data_portal.load_data(
+            start_date=preload_start,
+            end_date=end,
+            symbols=strategy_universe,
+            frequencies=sorted(freq_set),
+            market_hours=(self._market_open_time, self._market_close_time) if self._ignore_extended_hours else None,
+        )
+
+        # Build and return the timestamp index from the cache
+        return self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
     
     def _run_backtest(self, context, timestamp_index=None, market_hours=None):
         """Run the backtest algorithm.
@@ -328,7 +361,8 @@ class BacktestEngine:
                 self._pipeline_results = {}
                 
                 # Get data for the current day (timestamp only used for pipeline scheduling)
-                day_timestamp = datetime.combine(date, datetime.min.time())
+                context.current_ts = datetime.combine(date, datetime.min.time())
+                self.data_portal.set_current_dt(context.current_ts)
                 
                 # Compute any attached pipelines for this day
                 for name, pipeline in self.attached_pipelines.items():
@@ -336,8 +370,8 @@ class BacktestEngine:
                         # Run pipeline for just this date
                         pipeline_result = self.pipeline_engine.run_pipeline(
                             pipeline, 
-                            start_date=day_timestamp,
-                            end_date=day_timestamp
+                            start_date=context.current_ts,
+                            end_date=context.current_ts
                             )
                         if pipeline_result.height > 0:
                             # Make results available via pipeline_output
@@ -366,14 +400,7 @@ class BacktestEngine:
 
                 # Process each timestamp chronologically
                 for ts in iter_timestamps:
-                    # no preloaded ts_data; we will fetch a per-tick snapshot instead
-                    # Update context with current timestamp
-                    context.current_date = ts
-                    # Keep DataPortal clock in sync
-                    try:
-                        self.data_portal.set_current_dt(context.current_date)
-                    except Exception:
-                        pass
+                    self.data_portal.set_current_dt(ts)
                     
                     # Call handle_data for each timestamp to generate trading signals
                     if hasattr(self.strategy, 'handle_data'):
@@ -390,7 +417,7 @@ class BacktestEngine:
                     transactions = []
                     if universe:
                         try:
-                            transactions = self.broker.execute_orders_with_portal(self.data_portal, sorted(list(universe)), ts, market_hours)
+                            transactions = self.broker.execute_orders_with_portal(sorted(list(universe)), ts, market_hours)
                         except Exception:
                             transactions = []
 
@@ -418,6 +445,8 @@ class BacktestEngine:
                     is_last_timestamp = (ts == max(iter_timestamps)) if len(iter_timestamps) > 0 else False
                     if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
                         self.strategy.on_market_close(context, self.data_portal, self.portfolio)
+
+                    context.current_ts = ts
             
             # Prepare results
             return {
@@ -454,3 +483,19 @@ class BacktestEngine:
           - When no feed is provided, this method delegates to run() for historical mode.
         """
         pass
+
+    def dump_positions_ledger(self) -> pl.DataFrame:
+        """
+        Build and return the complete positions ledger (open and closed) as a Polars DataFrame.
+
+        Delegates to the portfolio to reconstruct positions from recorded events/transactions.
+        Returns an empty DataFrame if the portfolio is not initialized.
+        """
+        try:
+            if self.portfolio is None:
+                return pl.DataFrame()
+            # Portfolio provides latest price lookup internally when None
+            return self.portfolio.build_positions_ledger(latest_price_lookup=None)
+        except Exception:
+            # Fail-safe: never raise from dump; return empty DF to keep CLI resilient
+            return pl.DataFrame()

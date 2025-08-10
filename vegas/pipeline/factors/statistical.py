@@ -2,7 +2,7 @@
 
 This module defines factors for statistical transformations like Z-Score and ranking.
 """
-import numpy as np
+import polars as pl
 from vegas.pipeline.factors.custom import CustomFactor
 from vegas.pipeline.terms import Term
 
@@ -36,39 +36,12 @@ class ZScore(CustomFactor):
             mask=mask or term.mask,
         )
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Compute Z-scores for the input data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Input data to compute Z-scores from (typically from self.term)
         """
-        # Get the last row of data (most recent values)
-        if data.ndim > 1:
-            row = data[-1]
-        else:
-            row = data
-            
-        # Calculate mean and standard deviation with guards to avoid empty-slice warnings
-        finite_mask = np.isfinite(row)
-        if not np.any(finite_mask):
-            out[:] = np.nan
-            return
-        with np.errstate(invalid="ignore", divide="ignore"):
-            mean = np.nanmean(row[finite_mask])
-            std = np.nanstd(row[finite_mask], ddof=0)
-        if not np.isfinite(std) or std == 0:
-            out[:] = np.nan
-        else:
-            out[:] = (row - mean) / std
+        expr = self.term.to_expression()
+        return (expr - expr.mean().over('date')) / (expr.std().over('date'))
 
 
 class Rank(CustomFactor):
@@ -98,60 +71,11 @@ class Rank(CustomFactor):
             mask=mask or term.mask,
         )
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Compute ranks for the input data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Input data to compute ranks from (typically from self.term)
         """
-        # Get the last row of data (most recent values)
-        if data.ndim > 1:
-            row = data[-1]
-        else:
-            row = data
-        
-        # Handle NaN values - they should be ranked last
-        mask = np.isfinite(row)
-        
-        # Create array for ranks (initialize with NaN for assets that should be excluded)
-        ranks = np.full_like(row, np.nan)
-        
-        # Only rank finite values
-        values = row[mask]
-        if len(values) > 0:
-            # Calculate ranks for finite values
-            method_map = {
-                'ordinal': 'ordinal',
-                'min': 'min',
-                'max': 'max',
-                'dense': 'dense',
-                'average': 'average'
-            }
-            
-            # Use numpy's rankdata function with the specified method
-            from scipy.stats import rankdata
-            
-            # Adjust the order based on ascending parameter
-            if self.ascending:
-                ranked = rankdata(values, method=method_map[self.method])
-            else:
-                # For descending, reverse the ranks
-                ranked = len(values) + 1 - rankdata(values, method=method_map[self.method])
-                
-            # Put the ranks back in the original positions
-            ranks[mask] = ranked
-            
-        # Set output
-        out[:] = ranks
+        return self.term.to_expression().rank(method=self.method, descending=not self.ascending).over('date')
 
 
 class Percentile(CustomFactor):
@@ -175,41 +99,9 @@ class Percentile(CustomFactor):
             mask=mask or term.mask,
         )
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Compute percentiles for the input data.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        data : np.array
-            Input data to compute percentiles from (typically from self.term)
         """
-        # Get the last row of data (most recent values)
-        if data.ndim > 1:
-            row = data[-1]
-        else:
-            row = data
-        
-        # Handle NaN values
-        mask = np.isfinite(row)
-        
-        # Create array for percentiles (initialize with NaN for assets that should be excluded)
-        percentiles = np.full_like(row, np.nan)
-        
-        # Only compute percentiles for finite values
-        values = row[mask]
-        if len(values) > 0:
-            from scipy.stats import percentileofscore
-            
-            # Calculate percentile for each value
-            for i in np.where(mask)[0]:
-                percentiles[i] = percentileofscore(values, row[i]) / 100.0
-            
-        # Set output
-        out[:] = percentiles 
+        expr = self.term.to_expression()
+        return expr.rank(method='ordinal').over('date') / expr.count().over('date')

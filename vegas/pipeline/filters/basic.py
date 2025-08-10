@@ -2,8 +2,7 @@
 
 This module defines common basic filters like StaticAssets and comparison operations.
 """
-from typing import List, Union, Any
-import numpy as np
+import polars as pl
 from vegas.pipeline.terms import Filter, Term
 
 
@@ -20,29 +19,11 @@ class StaticAssets(Filter):
         self.assets = set(assets)
         super().__init__()
         
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """
         Determine which assets match the static list.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Not used in this filter
         """
-        # Use np.isin instead of np.in1d (deprecated)
-        # Convert assets to strings if they're not already
-        assets_list = [str(a) for a in assets]
-        assets_set = set(self.assets)
-        
-        # Compare each asset to the set of allowed assets
-        for i, asset in enumerate(assets_list):
-            out[i] = asset in assets_set
+        return pl.col('symbol').is_in(list(self.assets))
 
 
 class BinaryCompare(Filter):
@@ -76,52 +57,32 @@ class BinaryCompare(Filter):
         # Initialize with the gathered inputs and window_length
         super().__init__(inputs=inputs, window_length=window_length)
     
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """
         Apply the comparison operation.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Input arrays from left and/or right Term
         """
-        # Get the values for left and right
-        if len(inputs) == 0:
-            # Both are scalars
-            left_value = self.left
-            right_value = self.right
-        elif len(inputs) == 1:
-            # One Term, one scalar
-            if isinstance(self.left, Term):
-                left_value = inputs[0]
-                right_value = self.right
-            else:
-                left_value = self.left
-                right_value = inputs[0]
+        if isinstance(self.left, Term):
+            left_expr = self.left.to_expression()
         else:
-            # Both are Terms
-            left_value = inputs[0]
-            right_value = inputs[1]
-        
-        # Apply the comparison operator
+            left_expr = pl.lit(self.left)
+
+        if isinstance(self.right, Term):
+            right_expr = self.right.to_expression()
+        else:
+            right_expr = pl.lit(self.right)
+
         if self.op == '<':
-            out[:] = left_value < right_value
+            return left_expr < right_expr
         elif self.op == '<=':
-            out[:] = left_value <= right_value
+            return left_expr <= right_expr
         elif self.op == '==':
-            out[:] = left_value == right_value
+            return left_expr == right_expr
         elif self.op == '!=':
-            out[:] = left_value != right_value
+            return left_expr != right_expr
         elif self.op == '>=':
-            out[:] = left_value >= right_value
+            return left_expr >= right_expr
         elif self.op == '>':
-            out[:] = left_value > right_value
+            return left_expr > right_expr
         else:
             raise ValueError(f"Unknown comparison operator: {self.op}")
 
@@ -139,19 +100,8 @@ class NotNaN(Filter):
         self.term = term
         super().__init__(inputs=[term], window_length=term.window_length)
     
-    def compute(self, today, assets, out, data):
+    def to_expression(self) -> pl.Expr:
         """
         Identify values that are not NaN.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array
-            The assets for which values are requested
-        out : np.array[bool]
-            Output array of the same shape as assets
-        data : np.array
-            Input data from the term
         """
-        out[:] = ~np.isnan(data) 
+        return self.term.to_expression().is_not_nan()

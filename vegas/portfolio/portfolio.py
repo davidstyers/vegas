@@ -27,7 +27,7 @@ class Position:
 
 class Portfolio:
     """Portfolio tracking system for the Vegas event-driven backtesting engine."""
-    def __init__(self, initial_capital: float = 100000.0):
+    def __init__(self, initial_capital: float = 100000.0, data_portal=None):
         self.initial_capital = initial_capital
         self.current_cash = initial_capital
         self.positions: Dict[str, float] = {}        # symbol -> quantity (can be negative for shorts)
@@ -56,10 +56,6 @@ class Portfolio:
 
         self._logger = logging.getLogger('vegas.portfolio')
         # Optional DataPortal for price lookups
-        self._data_portal = None
-
-    def set_data_portal(self, data_portal) -> None:
-        """Inject a DataPortal for price lookups and mark-to-market operations."""
         self._data_portal = data_portal
 
     def set_account_snapshot(self, cash: float, positions_dict: Dict[str, Dict[str, float]]) -> None:

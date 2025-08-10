@@ -213,7 +213,8 @@ class Broker:
     
     def __init__(self, initial_cash: float = 100000.0,
                 slippage_model: Optional[SlippageModel] = None,
-                commission_model: Optional[CommissionModel] = None):
+                commission_model: Optional[CommissionModel] = None,
+                data_portal: Optional[object] = None):
         """Initialize the broker.
         
         Args:
@@ -231,7 +232,7 @@ class Broker:
         # Default to zero-cost per-share if none provided; engine/strategy can override
         self.commission_model: CommissionModel = commission_model or PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
         # Optional DataPortal reference
-        self._data_portal = None
+        self._data_portal = data_portal
 
     def set_data_portal(self, data_portal) -> None:
         """Inject a DataPortal for brokers that need to fetch market data internally."""
@@ -344,6 +345,7 @@ class Broker:
         order._bracket_stop_limit_price = float(stop_limit_price) if stop_limit_price is not None else None  # type: ignore[attr-defined]
         order._bracket_stop_trail_amount = float(stop_trail_amount) if stop_trail_amount is not None else None  # type: ignore[attr-defined]
         order._bracket_stop_trail_percent = float(stop_trail_percent) if stop_trail_percent is not None else None  # type: ignore[attr-defined]
+
 
         return order
     
@@ -607,12 +609,15 @@ class Broker:
         return executed_transactions
 
     # Convenience path to ensure all market data access can go through DataPortal
-    def execute_orders_with_portal(self, data_portal, symbols: List[str], timestamp: datetime, market_hours: Optional[tuple] = None) -> List[Transaction]:
+    def execute_orders_with_portal(self, symbols: List[str], timestamp: datetime, market_hours: Optional[tuple] = None) -> List[Transaction]:
         """
         Fetch the per-timestamp snapshot via DataPortal and execute orders.
         """
         try:
-            ts_slice = data_portal.get_slice_for_timestamp(timestamp, sorted(list(symbols)), market_hours=market_hours)
+            dp = self._data_portal
+            if dp is None:
+                raise RuntimeError("DataPortal is not set on Broker. Pass it into Broker(...) at initialization.")
+            ts_slice = dp.get_slice_for_timestamp(timestamp, sorted(list(symbols)), market_hours=market_hours)
         except Exception:
             ts_slice = pl.DataFrame()
         # Build symbol->DataFrame map

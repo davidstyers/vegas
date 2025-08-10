@@ -3,8 +3,7 @@
 This module defines the core building blocks for computations in the pipeline system.
 """
 from typing import List, Optional, Union, Any
-import numpy as np
-import pandas as pd
+import polars as pl
 
 
 class Term:
@@ -13,9 +12,9 @@ class Term:
     
     Terms are the core building blocks for pipeline expressions.
     """
-    def __init__(self, 
-                 inputs: Optional[List['Term']] = None, 
-                 window_length: int = 1, 
+    def __init__(self,
+                 inputs: Optional[List['Term']] = None,
+                 window_length: int = 1,
                  mask: Optional['Filter'] = None):
         """
         Initialize a Term with inputs and parameters.
@@ -33,10 +32,8 @@ class Term:
         self.window_length = window_length
         self.mask = mask
         self.name = None
-        self.dtype = np.float64
-        self.missing_value = np.nan
         
-    def compute(self, today: pd.Timestamp, assets: np.ndarray, out: np.ndarray, *inputs) -> None:
+    def to_expression(self) -> pl.Expr:
         """
         Calculate values for this Term.
         
@@ -54,7 +51,7 @@ class Term:
         *inputs : tuple of np.array
             Raw data arrays for any inputs to this Term
         """
-        raise NotImplementedError("Term subclasses must implement compute")
+        raise NotImplementedError("Term subclasses must implement to_expression")
     
     def __lt__(self, other) -> 'Filter':
         """Binary operator <"""
@@ -94,8 +91,6 @@ class Factor(Term):
     Factors are the most common type of Pipeline expression, representing
     quantities like momentum, volatility, etc.
     """
-    dtype = np.float64
-    missing_value = np.nan
 
     def __add__(self, other) -> 'Factor':
         """Binary operator +"""
@@ -218,44 +213,28 @@ class BinaryFactor(Factor):
         window_length = max([t.window_length for t in inputs]) if inputs else 1
         super().__init__(inputs=inputs, window_length=window_length)
         
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """Apply the binary operation to inputs."""
-        op_map = {
-            '+': np.add,
-            '-': np.subtract,
-            '*': np.multiply,
-            '/': np.divide,
-        }
-        
-        try:
-            if len(inputs) == 0:
-                # Both inputs are scalars
-                if self.op == '+':
-                    out[:] = float(self.left) + float(self.right)
-                elif self.op == '-':
-                    out[:] = float(self.left) - float(self.right)
-                elif self.op == '*':
-                    out[:] = float(self.left) * float(self.right)
-                elif self.op == '/':
-                    out[:] = float(self.left) / float(self.right)
-            elif len(inputs) == 1:
-                # One input is a scalar, one is a Term
-                if self.left is inputs[0]:
-                    left = inputs[0].astype(np.float64)
-                    right = float(self.right)
-                else:
-                    left = float(self.left)
-                    right = inputs[0].astype(np.float64)
-                
-                op_map[self.op](left, right, out=out)
-            else:
-                # Both inputs are Terms
-                left = inputs[0].astype(np.float64)
-                right = inputs[1].astype(np.float64)
-                op_map[self.op](left, right, out=out)
-        except Exception as e:
-            # If operation fails, fill with NaN
-            out[:] = np.nan
+        if isinstance(self.left, Term):
+            left_expr = self.left.to_expression()
+        else:
+            left_expr = pl.lit(self.left)
+
+        if isinstance(self.right, Term):
+            right_expr = self.right.to_expression()
+        else:
+            right_expr = pl.lit(self.right)
+
+        if self.op == '+':
+            return left_expr + right_expr
+        elif self.op == '-':
+            return left_expr - right_expr
+        elif self.op == '*':
+            return left_expr * right_expr
+        elif self.op == '/':
+            return left_expr / right_expr
+        else:
+            raise ValueError(f"Unknown operator: {self.op}")
 
 
 class Filter(Term):
@@ -264,10 +243,6 @@ class Filter(Term):
     
     Filters are used to exclude or include assets based on various criteria.
     """
-    # Use dtype=object so NumPy ufuncs don't coerce bools to float64 when combining masks.
-    # We'll ensure boolean dtype at the engine boundary before applying the screen.
-    dtype = np.dtype(object)
-    missing_value = False
     
     def __and__(self, other) -> 'Filter':
         """Binary operator &"""
@@ -309,57 +284,24 @@ class BinaryFilter(Filter):
         window_length = max([t.window_length for t in inputs]) if inputs else 1
         super().__init__(inputs=inputs, window_length=window_length)
         
-    def compute(self, today, assets, out, *inputs):
+    def to_expression(self) -> pl.Expr:
         """Apply the binary operation to inputs, producing a strict boolean mask."""
-        def to_bool_array(val, length):
-            # Convert scalars or arrays to strict boolean ndarray of expected length.
-            if isinstance(val, (bool, np.bool_)):
-                return np.full(length, bool(val), dtype=bool)
-            arr = np.asarray(val)
-            # If object dtype (from upstream), coerce via truthiness to bool elementwise where possible.
-            if arr.dtype == object:
-                # Convert None/np.nan to False, truthy to True
-                coerced = np.zeros(arr.shape, dtype=bool)
-                it = np.nditer(arr, flags=['refs_ok', 'multi_index'], op_flags=['readonly'])
-                for x in it:
-                    v = x.item()
-                    coerced[it.multi_index] = bool(v) if isinstance(v, (bool, np.bool_, int, float)) else bool(v is True)
-                arr = coerced
-            else:
-                arr = arr.astype(bool, copy=False)
-            # Ensure 1-D of correct length
-            arr = np.ravel(arr)
-            if arr.shape[0] != length:
-                # Broadcast scalar-like
-                if arr.shape[0] == 1:
-                    arr = np.full(length, bool(arr[0]), dtype=bool)
-                else:
-                    # On mismatch, fail-safe to all False
-                    arr = np.zeros(length, dtype=bool)
-            return arr
-
-        n = len(assets)
-        if len(inputs) == 0:
-            left = to_bool_array(self.left, n)
-            right = to_bool_array(self.right, n)
-        elif len(inputs) == 1:
-            if self.left is inputs[0]:
-                left = to_bool_array(inputs[0], n)
-                right = to_bool_array(self.right, n)
-            else:
-                left = to_bool_array(self.left, n)
-                right = to_bool_array(inputs[0], n)
+        if isinstance(self.left, Term):
+            left_expr = self.left.to_expression()
         else:
-            left = to_bool_array(inputs[0], n)
-            right = to_bool_array(inputs[1], n)
+            left_expr = pl.lit(self.left)
+
+        if isinstance(self.right, Term):
+            right_expr = self.right.to_expression()
+        else:
+            right_expr = pl.lit(self.right)
 
         if self.op == '&':
-            np.bitwise_and(left, right, out=out, dtype=bool)
+            return left_expr & right_expr
         elif self.op == '|':
-            np.bitwise_or(left, right, out=out, dtype=bool)
+            return left_expr | right_expr
         else:
-            # Unknown op -> all False
-            out[:] = False
+            raise ValueError(f"Unknown operator: {self.op}")
 
 
 class UnaryFilter(Filter):
@@ -380,22 +322,12 @@ class UnaryFilter(Filter):
         self.op = op
         super().__init__(inputs=[input_filter], window_length=input_filter.window_length)
         
-    def compute(self, today, assets, out, in_filter):
+    def to_expression(self) -> pl.Expr:
         """Apply the unary operation to input, producing strict boolean mask."""
-        arr = np.asarray(in_filter)
-        if arr.dtype == object:
-            arr = np.array([bool(x) for x in arr.ravel()], dtype=bool)
-        else:
-            arr = arr.astype(bool, copy=False).ravel()
-        if arr.shape[0] != len(assets):
-            if arr.shape[0] == 1:
-                arr = np.full(len(assets), bool(arr[0]), dtype=bool)
-            else:
-                arr = np.zeros(len(assets), dtype=bool)
         if self.op == '~':
-            np.logical_not(arr, out=out)
+            return ~self.input_filter.to_expression()
         else:
-            out[:] = False
+            raise ValueError(f"Unknown operator: {self.op}")
 
 
 class Classifier(Term):
@@ -404,5 +336,5 @@ class Classifier(Term):
     
     Classifiers are used to group assets by shared characteristics like sector.
     """
-    dtype = np.int64
-    missing_value = -1 
+    dtype = pl.Int64
+    missing_value = -1

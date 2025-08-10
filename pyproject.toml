@@ -29,6 +29,7 @@ ibkr = ["ibapi"]
 [tool.poetry.group.dev.dependencies]
 psutil = "^7.0.0"
 pytest = "^8.4.1"
+pytest-cov = "^5.0.0"
 jupyter = "^1.1.1"
 mplfinance = "^0.12.10b0"
 

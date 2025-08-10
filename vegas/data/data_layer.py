@@ -4,20 +4,17 @@ This module provides functionality for ingesting and querying historical market 
 using polars and numpy for efficient vectorized operations.
 """
 
-from typing import Dict, List, Optional, Union, Set
+from typing import Dict, List, Optional, Union
 from datetime import datetime, timedelta
 import os
 import polars as pl
-import numpy as np
 import glob
 import zstandard as zstd
 import io
 import logging
-from pathlib import Path
 import tempfile
 import shutil
 import pytz
-from collections import OrderedDict
 
 from vegas.database import DatabaseManager
 
@@ -73,14 +70,7 @@ class DataLayer:
         self.db_manager = None
         self.use_database = True
         
-        # ---- Cache configuration ----
-        self._cache_enabled = True
-        self._query_cache_max = 64
-        self._slice_cache_max = 16
-        self._query_cache: "OrderedDict[tuple, pl.DataFrame]" = OrderedDict()
-        # maps (date_iso, frozenset(symbols), market_hours_tuple, timezone) -> dict[datetime, pl.DataFrame]
-        self._slice_cache: "OrderedDict[tuple, Dict[datetime, pl.DataFrame]]" = OrderedDict()
-        # -----------------------------------
+        # Note: All runtime caching has moved to DataPortal. DataLayer performs IO/DB only.
         
         try:
             self.db_manager = DatabaseManager(self.db_path, self.parquet_dir)
@@ -116,26 +106,7 @@ class DataLayer:
             
         return df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=self.timezone)))
 
-    # ---- Cache helpers ----
-    def _make_query_key(self, start: datetime, end: datetime, symbols: Optional[List[str]], market_hours: Optional[tuple]) -> tuple:
-        syms = tuple(sorted(symbols)) if symbols else None
-        mh = tuple(market_hours) if market_hours else None
-        return (start.isoformat(), end.isoformat(), syms, mh, str(self.timezone))
-
-    def _lru_get(self, cache: OrderedDict, key):
-        if key in cache:
-            val = cache.pop(key)
-            cache[key] = val
-            return val
-        return None
-
-    def _lru_set(self, cache: OrderedDict, key, val, maxsize: int):
-        if key in cache:
-            cache.pop(key)
-        cache[key] = val
-        while len(cache) > maxsize:
-            cache.popitem(last=False)
-    # ------------------------
+    # Cache helpers removed. DataLayer no longer implements an internal cache.
     
     def is_initialized(self) -> bool:
         """Check if the data layer is initialized with data."""
@@ -360,7 +331,8 @@ class DataLayer:
             return ts.cast(pl.Datetime("us", time_zone=self.timezone))
 
         try:
-            return self.db_manager.get_unified_timestamps(start_ts, end_ts, timezone=self.timezone)
+            ts = self.db_manager.get_unified_timestamps(start_ts, end_ts, timezone=self.timezone)
+            return ts
         except Exception as e:
             self.logger.error(f"get_unified_timestamp_index failed: {e}")
             return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=self.timezone))
@@ -383,15 +355,7 @@ class DataLayer:
         def _time_str_to_minutes(time_str: str) -> int:
             hour, minute = map(int, time_str.split(":"))
             return hour * 60 + minute
-        
-        # Try cache first
-        if self._cache_enabled:
-            qkey = self._make_query_key(start_ts, end_ts, symbols, market_hours)
-            cached = self._lru_get(self._query_cache, qkey)
-            if cached is not None:
-                self.data = cached
-                return cached
-
+       
         # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
@@ -406,11 +370,9 @@ class DataLayer:
                     else:
                         result = raw
                     self.data = result
-                    if self._cache_enabled:
-                        self._lru_set(self._query_cache, qkey, result, self._query_cache_max)
                     return result
             finally:
-                self.logger.info("Data loaded from database")
+                self.logger.debug("Data loaded from database")
             
         # No data available
         return pl.DataFrame()
@@ -490,24 +452,26 @@ class DataLayer:
         """Get the available date range in the dataset."""
         if self.date_range:
             return self.date_range
-            
         # Try to get from database
         if self.use_database and self.db_manager:
             try:
                 dates = self.db_manager.get_available_dates()
                 if not dates.is_empty():
-                    return (dates.select('start_date').item(), dates.select('end_date').item())
+                    out = (dates.select('start_date').item(), dates.select('end_date').item())
+                    return out
             except Exception:
                 pass
                 
         # Use data if available
         if self.data is not None and not self.data.is_empty():
-            return (self.data.select(pl.col('timestamp').min()).item(), self.data.select(pl.col('timestamp').max()).item())
+            out = (self.data.select(pl.col('timestamp').min()).item(), self.data.select(pl.col('timestamp').max()).item())
+            return out
             
         return (None, None)
     
     def get_data_info(self) -> Dict:
         """Get information about loaded data."""
+        # Caching is handled by subordinate methods; build response cheaply
         start_date, end_date = self.get_available_date_range()
         
         if start_date is None or end_date is None:
@@ -529,7 +493,6 @@ class DataLayer:
             symbol_count = len(self.symbols)
         elif self.use_database and self.db_manager:
             try:
-                # Get from database
                 symbols = self.db_manager.get_available_symbols()
                 symbol_count = len(symbols)
             except Exception:
@@ -599,87 +562,20 @@ class DataLayer:
             except Exception as e:
                 self.logger.error(f"Error closing database connection: {e}")
     
-    def get_data_for_timestamp(self, timestamp: datetime) -> pl.DataFrame:
-        """Get market data for a specific timestamp.
-        
-        Args:
-            timestamp: The timestamp to get data for
-            
-        Returns:
-            DataFrame with market data for the timestamp
+    def get_data_for_timestamp(self, timestamp: datetime, symbols: Optional[Union[List[str], str]] = None, market_hours: Optional[tuple] = None) -> pl.DataFrame:
+        """Return rows for the exact timestamp, optionally filtered by symbols.
         """
-        # Ensure timestamp is timezone-aware
-        ts = timestamp
-        if ts.tz is None:
-            ts = ts.tz_localize(self.timezone)
-        elif str(ts.tz) != str(self.timezone):  # Compare string representations instead of .zone attribute
-            try:
-                ts = ts.tz_convert(self.timezone)
-            except Exception as e:
-                self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-            
-        # Try to get data from database first if available
-        if self.use_database and self.db_manager:
-            try:
-                # Use a small window around the timestamp to ensure we get data
-                start_time = ts - timedelta(minutes=1)
-                end_time = ts + timedelta(minutes=1)
-                data = self.db_manager.get_market_data(start_date=start_time, end_date=end_time)
-                
-                # Filter to get closest timestamps
-                if not data.is_empty():
-                    # Convert timestamps to the configured timezone
-                    data = self._convert_timestamp_timezone(data)
-                    
-                    # Get the closest timestamp for each symbol
-                    grouped = data.groupby('symbol')
-                    closest_data = []
-                    
-                    for symbol, group in grouped:
-                        # Find the row with timestamp closest to the target
-                        group['time_diff'] = abs(group['timestamp'] - ts)
-                        closest_row = group.loc[group['time_diff'].idxmin()].drop('time_diff')
-                        closest_data.append(closest_row)
-                    
-                    if closest_data:
-                        return pl.DataFrame(closest_data) if closest_data else pl.DataFrame()
-            except Exception as e:
-                self.logger.warning(f"Failed to get data from database for timestamp {ts}: {e}")
-        
-        # Fall back to in-memory data if available
-        if self.data is not None:
-            # Make sure timestamps have timezone info for comparison
-            data_copy = self.data.clone()
-            dtype = data_copy.schema['timestamp']
-            if isinstance(dtype, pl.datatypes.Datetime):
-                current_tz = dtype.tz
-            else:
-                current_tz = None
+        # Normalize symbols
+        if isinstance(symbols, str):
+            sym_list: Optional[List[str]] = [symbols]
+        else:
+            sym_list = symbols
 
-            if current_tz is None:
-                # Localize naive timestamps to UTC then convert
-                data_copy = data_copy.with_columns(
-                    pl.col('timestamp').cast(pl.Datetime('us', time_zone='UTC')).cast(pl.Datetime('us', time_zone=self.timezone)))
-            else:
-                 # If timezone differs, convert
-                if current_tz != self.timezone:
-                    try:
-                        data_copy = data_copy.with_columns(
-                        pl.col('timestamp').cast(pl.Datetime('us', time_zone=self.timezone)))
-                    except Exception as e:
-                        self.logger.warning(f"Failed to convert timestamp timezone: {e}")
-                
-            # Find the closest timestamp for each symbol
-            data_copy['time_diff'] = abs(data_copy['timestamp'] - ts)
-            
-            # Get the closest timestamp for each symbol
-            closest_idx = data_copy.groupby('symbol')['time_diff'].idxmin()
-            result = data_copy.loc[closest_idx].drop('time_diff', axis=1)
-            
-            return result
-            
-        # No data available
-        return pl.DataFrame()
+        # Query only the specific instant via backtest path to leverage its cache
+        df = self.get_data_for_backtest(start=timestamp, end=timestamp, symbols=sym_list, market_hours=market_hours)
+        if df is None or df.is_empty():
+            return pl.DataFrame()
+        return df
     
     def get_trading_days(self, start_date: datetime, end_date: datetime) -> pl.Series:
         """Return unique trading days (pl.Date) within [start_date, end_date] that have data.
@@ -707,7 +603,8 @@ class DataLayer:
             .unique()
             .sort("date")
         )
-        return dates_df.get_column("date")
+        out = dates_df.get_column("date")
+        return out
     
     def get_data_for_date(self, date: datetime) -> pl.DataFrame:
         """Get all market data for a specific date.
@@ -723,7 +620,7 @@ class DataLayer:
         
         return self.get_data_for_backtest(date_floor, date_ceil)
 
-    def history(self, assets: Union[str, List[str]], current_dt: datetime, fields: Union[str, List[str]], bar_count: int, frequency: str = '1h') -> pl.DataFrame:
+    def history(self, assets: Union[str, List[str]], current_dt: datetime, fields: Optional[Union[str, List[str]]] = None, bar_count: int = 1, frequency: str = '1h') -> pl.DataFrame:
         """
         Fetch a window of historical market data.
 
@@ -740,77 +637,71 @@ class DataLayer:
             A Polars DataFrame containing the requested historical data, indexed by datetime
             with columns for each asset and field.
         """
+        # Default fields
+        if not fields:
+            fields = ['open', 'high', 'low', 'close', 'volume']
 
-        # 1. Normalize parameters
+        # Normalize parameters
+        symbols: Optional[List[str]]
         if isinstance(assets, str):
-            assets = [assets]
+            symbols = [assets]
+        else:
+            symbols = assets
         if isinstance(fields, str):
             fields = [fields]
-        
-        # Handle 'price' as a common alias for 'close'
+
+        # Handle 'price' alias
         if 'price' in fields:
             fields = ['close' if f == 'price' else f for f in fields]
 
-        # 2. Construct and execute the query
-        # We need to select the `bar_count` most recent bars for each asset before `current_dt`.
-        query_fields = sorted(list(set(fields + ['timestamp', 'symbol'])))
-        fields_str = ", ".join(f'"{f}"' for f in query_fields)
-        assets_str = ", ".join([f"'{s}'" for s in assets])
-
-        query = f"""
-        WITH ranked_data AS (
-            SELECT
-                *,
-                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
-            FROM market_data
-            WHERE
-                symbol IN ({assets_str})
-                AND timestamp <= ?
-        )
-        SELECT {fields_str}
-        FROM ranked_data
-        WHERE rn <= ?
-        ORDER BY timestamp ASC, symbol
-        """
-        
-        params = (current_dt, bar_count)
-        self.logger.debug(f"Executing history query with params {params}")
-        
+        # Retrieve bars via DatabaseManager to avoid duplicated SQL logic here
         try:
-            df = self.db_manager.query_to_df(query, params)
+            df = self.db_manager.get_market_data(
+                end_date=current_dt,
+                symbols=symbols,
+                timezone=self.timezone,
+                bar_count=bar_count,
+            )
         except Exception as e:
-            self.logger.error(f"Failed to fetch history: {e}")
+            self.logger.error(f"Failed to fetch history via DatabaseManager: {e}")
             return pl.DataFrame()
 
         if df.is_empty():
             return pl.DataFrame()
 
-        # 3. Handle resampling if requested frequency is different
-        # Assuming native frequency is 1h based on ingestion methods.
+        # Select requested fields plus timestamp/symbol to keep consistent
+        select_cols = ['timestamp', 'symbol'] + [f for f in fields if f in df.columns]
+        df = df.select(select_cols)
+
+        # Resample if needed (native frequency assumed '1h')
         native_frequency = '1h'
         if frequency != native_frequency:
             self.logger.info(f"Resampling data from '{native_frequency}' to '{frequency}'")
-            
+
             agg_exprs = []
-            if 'open' in fields: agg_exprs.append(pl.col('open').first().alias('open'))
-            if 'high' in fields: agg_exprs.append(pl.col('high').max().alias('high'))
-            if 'low' in fields: agg_exprs.append(pl.col('low').min().alias('low'))
-            if 'close' in fields: agg_exprs.append(pl.col('close').last().alias('close'))
-            if 'volume' in fields: agg_exprs.append(pl.col('volume').sum().alias('volume'))
+            if 'open' in fields and 'open' in df.columns:
+                agg_exprs.append(pl.col('open').first().alias('open'))
+            if 'high' in fields and 'high' in df.columns:
+                agg_exprs.append(pl.col('high').max().alias('high'))
+            if 'low' in fields and 'low' in df.columns:
+                agg_exprs.append(pl.col('low').min().alias('low'))
+            if 'close' in fields and 'close' in df.columns:
+                agg_exprs.append(pl.col('close').last().alias('close'))
+            if 'volume' in fields and 'volume' in df.columns:
+                agg_exprs.append(pl.col('volume').sum().alias('volume'))
 
-            if not agg_exprs:
-                self.logger.warning(f"Resampling for fields {fields} is not defined, returning un-resampled data.")
+            if agg_exprs:
+                df = (
+                    df.sort("timestamp")
+                      .group_by_dynamic("timestamp", every=frequency, by="symbol")
+                      .agg(agg_exprs)
+                )
             else:
-                df = df.sort("timestamp").group_by_dynamic(
-                    "timestamp",
-                    every=frequency,
-                    by="symbol"
-                ).agg(agg_exprs)
+                self.logger.warning(f"Resampling for fields {fields} is not defined; returning un-resampled data.")
 
-        # 4. Pivot to wide format as requested
-        if not df.is_empty():
+        # Pivot to wide format only when a specific symbol subset was requested
+        if not df.is_empty() and symbols:
             try:
-                # This creates columns like 'close_AAPL', 'volume_AAPL'
                 pivot_values = [f for f in fields if f in df.columns]
                 if pivot_values:
                     df = df.pivot(index='timestamp', columns='symbol', values=pivot_values)
