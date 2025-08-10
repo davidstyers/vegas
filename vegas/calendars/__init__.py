@@ -21,9 +21,18 @@ _CALENDAR_REGISTRY.update({
 
 
 def get_calendar(name: str) -> TradingCalendar:
-    """Return a calendar instance by common name.
+    """Return a calendar instance by common name (case-insensitive).
 
-    Supported names include "NYSE" and "XNYS".
+    Supported names include "NYSE", "XNYS", and "24/7". Raises a helpful
+    error listing supported names when an unknown name is supplied.
+
+    :param name: Calendar name.
+    :type name: str
+    :returns: TradingCalendar instance.
+    :rtype: TradingCalendar
+    :raises KeyError: If the calendar name is not recognized.
+    :Example:
+        >>> cal = get_calendar('24/7')
     """
     key = name.upper()
     if key not in _CALENDAR_REGISTRY:

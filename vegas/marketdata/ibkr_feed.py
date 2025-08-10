@@ -32,6 +32,11 @@ from vegas.marketdata.feed import MarketDataFeed
 
 @dataclass
 class IBKRFeedConfig:
+    """Configuration for `InteractiveBrokersFeed`.
+
+    Attributes mirror typical paper-trading defaults. Some fields (bar_size,
+    what_to_show, use_rth) are placeholders for future live data integrations.
+    """
     host: str = "127.0.0.1"
     port: int = 7497
     client_id: int = 124
@@ -42,12 +47,10 @@ class IBKRFeedConfig:
 
 
 class InteractiveBrokersFeed(MarketDataFeed):
-    """
-    MarketDataFeed implementation for Interactive Brokers.
+    """Interactive Brokers `MarketDataFeed` (phase 1 skeleton).
 
-    Phase 1:
-      - No real network; exposes in-memory injection helpers for tests.
-      - Maintains a per-timestamp queue of polars DataFrame slices.
+    - No real network connectivity; exposes `_inject_bar` for tests.
+    - Maintains a queue of per-timestamp Polars DataFrame slices.
     """
 
     def __init__(
@@ -69,11 +72,13 @@ class InteractiveBrokersFeed(MarketDataFeed):
         self._thread: Optional[threading.Thread] = None
 
     def subscribe(self, symbols: List[str], fields: Optional[List[str]] = None) -> None:
+        """Subscribe to symbols/fields; fields are optional and advisory."""
         if symbols:
             self._symbols = list(symbols)
         self._fields = fields
 
     def start(self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None) -> None:
+        """Start the feed; in phase 1 this only toggles internal flags."""
         if self._started:
             return
         self._started = True
@@ -86,9 +91,11 @@ class InteractiveBrokersFeed(MarketDataFeed):
             pass
 
     def stop(self) -> None:
+        """Stop the feed; subsequent `next_bar` calls return None."""
         self._stopped = True
 
     def next_bar(self) -> Optional[Tuple[datetime, pl.DataFrame]]:
+        """Return next injected bar or None if queue is empty or feed stopped."""
         if not self._started or self._stopped or self._closed:
             return None
         try:
@@ -108,12 +115,15 @@ class InteractiveBrokersFeed(MarketDataFeed):
         return ts, df
 
     def current_time(self) -> Optional[datetime]:
+        """Return the timestamp of the last emitted bar, if any."""
         return self._current_ts
 
     def is_realtime(self) -> bool:
+        """Return True to reflect push-like behavior in tests."""
         return self._is_realtime
 
     def close(self) -> None:
+        """Close the feed and drain any queued bars."""
         self._closed = True
         self._stopped = True
         # drain queue
@@ -126,9 +136,9 @@ class InteractiveBrokersFeed(MarketDataFeed):
     # ---- Test helpers (not part of public interface) ----
 
     def _inject_bar(self, ts: datetime, rows: List[dict]) -> None:
-        """
-        Inject a ready-to-emit bar slice (per timestamp) as a polars DataFrame.
-        rows must include keys: timestamp, symbol, open, high, low, close, volume.
+        """Inject a per-timestamp bar slice as a Polars DataFrame.
+
+        `rows` must include keys: timestamp, symbol, open, high, low, close, volume.
         """
         df = pl.DataFrame(rows)
         # Normalize timestamp dtype

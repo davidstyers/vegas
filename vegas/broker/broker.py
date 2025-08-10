@@ -17,7 +17,15 @@ from vegas.strategy import Signal
 
 
 class OrderStatus(Enum):
-    """Order status enumeration."""
+    """Order status enumeration.
+
+    Values:
+      - OPEN: Newly placed or partially processed order
+      - FILLED: Fully executed order
+      - PARTIALLY_FILLED: Order with partial fills remaining
+      - CANCELLED: Order cancelled before complete fill
+      - REJECTED: Order rejected by broker/exchange simulation
+    """
     OPEN = 'open'
     FILLED = 'filled'
     PARTIALLY_FILLED = 'partially_filled'
@@ -26,7 +34,7 @@ class OrderStatus(Enum):
 
 
 class OrderType(Enum):
-    """Order type enumeration."""
+    """Order type enumeration for execution semantics."""
     MARKET = 'market'
     LIMIT = 'limit'
     STOP = 'stop'
@@ -37,30 +45,49 @@ class OrderType(Enum):
 
 @dataclass
 class Order:
-    """Order representation with extended types (stop, stop-limit, trailing) and OCO/brackets.
-    
-    Attributes:
-        id: Unique order identifier
-        symbol: Trading symbol
-        quantity: Order quantity (positive for buy, negative for sell). Sign implies side.
-        order_type: MARKET, LIMIT, STOP, STOP_LIMIT, TRAIL_STOP, TRAIL_STOP_LIMIT
-        limit_price: Price limit for LIMIT or for post-trigger LIMIT conversion
-        stop_price: Static stop trigger price (STOP/STOP_LIMIT)
-        trail_amount: Absolute dollar trail distance (mutually exclusive with trail_percent)
-        trail_percent: Percent trail (0.30 = 30%) (mutually exclusive with trail_amount)
-        trigger_on_range: If True, evaluate triggers against bar high/low range (recommended)
-        created_at: Order creation timestamp
-        status: Current order status
-        filled_quantity: Quantity filled so far
-        filled_price: Average fill price for filled quantity
-        # Runtime state for trailing:
-        trail_ref_price: Highest (long) or lowest (short) reference since activation
-        dynamic_stop: Current computed trailing stop level
-        triggered: Whether the stop/trigger condition has fired (for STOP/STOP_LIMIT/TRAIL_*)
-        # Bracket/OCO:
-        parent_id: If set, this order is a child of a parent order (e.g. bracket)
-        oco_group_id: If set, this order is part of an OCO group; when one fills, others cancel
-        bracket_role: Optional role hint for readability: "take_profit" or "stop_loss"
+    """Order with extended types (stop/limit/trailing) and OCO/brackets.
+
+    :param id: Unique order identifier.
+    :type id: str
+    :param symbol: Trading symbol.
+    :type symbol: str
+    :param quantity: Positive for buy, negative for sell. Sign implies side.
+    :type quantity: float
+    :param order_type: Order type (MARKET, LIMIT, STOP, STOP_LIMIT, TRAIL_STOP, TRAIL_STOP_LIMIT).
+    :type order_type: OrderType
+    :param limit_price: Limit level for LIMIT or post-trigger STOP_LIMIT/TRAIL_STOP_LIMIT.
+    :type limit_price: Optional[float]
+    :param stop_price: Static stop trigger for STOP/STOP_LIMIT.
+    :type stop_price: Optional[float]
+    :param trail_amount: Absolute trailing distance; mutually exclusive with `trail_percent`.
+    :type trail_amount: Optional[float]
+    :param trail_percent: Percent trailing distance (0.3 = 30%); mutually exclusive with `trail_amount`.
+    :type trail_percent: Optional[float]
+    :param trigger_on_range: If True, evaluate triggers against intrabar high/low range.
+    :type trigger_on_range: bool
+    :param created_at: Creation timestamp; defaults to now if omitted.
+    :type created_at: datetime
+    :param status: Current order status.
+    :type status: OrderStatus
+    :param filled_quantity: Total filled quantity.
+    :type filled_quantity: float
+    :param filled_price: Average fill price.
+    :type filled_price: Optional[float]
+    :param trail_ref_price: For trailing orders, the reference price since activation.
+    :type trail_ref_price: Optional[float]
+    :param dynamic_stop: Computed trailing stop level when applicable.
+    :type dynamic_stop: Optional[float]
+    :param triggered: Whether trigger condition has fired.
+    :type triggered: bool
+    :param parent_id: Parent order id for bracket children.
+    :type parent_id: Optional[str]
+    :param oco_group_id: OCO group id to coordinate cancellations among siblings.
+    :type oco_group_id: Optional[str]
+    :param bracket_role: Optional role hint: 'take_profit' or 'stop_loss'.
+    :type bracket_role: Optional[str]
+    :raises ValueError: If incompatible field combinations are supplied.
+    :Example:
+        >>> Order(id='1', symbol='AAPL', quantity=10, order_type=OrderType.MARKET)
     """
     id: str
     symbol: str
@@ -85,7 +112,10 @@ class Order:
     bracket_role: Optional[str] = None
     
     def __post_init__(self):
-        """Initialize with default values and validate fields."""
+        """Finalize initialization and validate trailing/stop parameters.
+
+        :raises ValueError: If mutually exclusive or required fields are missing.
+        """
         if self.created_at is None:
             self.created_at = datetime.now()
         if self.id is None:
@@ -105,16 +135,26 @@ class Order:
 
 @dataclass
 class Transaction:
-    """Transaction record.
-    
-    Attributes:
-        id: Unique transaction identifier
-        order_id: Reference to the originating order
-        symbol: Trading symbol
-        quantity: Transaction quantity (positive for buy, negative for sell)
-        price: Execution price
-        commission: Transaction fee
-        timestamp: Transaction timestamp
+    """Transaction record produced by execution.
+
+    :param id: Unique transaction identifier.
+    :type id: str
+    :param order_id: Id of originating order.
+    :type order_id: str
+    :param symbol: Trading symbol.
+    :type symbol: str
+    :param quantity: Quantity signed by side.
+    :type quantity: float
+    :param price: Execution price.
+    :type price: float
+    :param commission: Commission paid for the transaction.
+    :type commission: float
+    :param timestamp: Execution timestamp (defaults to now).
+    :type timestamp: datetime
+    :returns: None
+    :rtype: None
+    :Example:
+        >>> Transaction(id='t1', order_id='o1', symbol='AAPL', quantity=5, price=190.0, commission=0.0, timestamp=datetime.now())
     """
     id: str
     order_id: str
@@ -125,7 +165,7 @@ class Transaction:
     timestamp: datetime
     
     def __post_init__(self):
-        """Initialize with default values."""
+        """Assign defaults when omitted (id, timestamp)."""
         if self.id is None:
             self.id = str(uuid.uuid4())
         if self.timestamp is None:
@@ -133,29 +173,25 @@ class Transaction:
     
     @property
     def value(self) -> float:
-        """Calculate transaction value.
-        
-        Returns:
-            Transaction value (positive for buys, negative for sells)
+        """Return signed transaction value (quantity * price).
+
+        :returns: Transaction value; positive for buys, negative for sells.
+        :rtype: float
         """
         return self.quantity * self.price
 
 
 class Position:
     """Position representation for a single symbol.
-    
-    Attributes:
-        symbol: Trading symbol
-        quantity: Current position size
-        cost_basis: Average cost basis
-        market_value: Current market value
+
+    Tracks signed quantity, average cost basis, and current marked value.
     """
     
     def __init__(self, symbol: str):
-        """Initialize a position.
-        
-        Args:
-            symbol: Trading symbol
+        """Initialize a position for ``symbol`` with zero quantity.
+
+        :param symbol: Trading symbol.
+        :type symbol: str
         """
         self.symbol = symbol
         self.quantity = 0.0
@@ -163,11 +199,14 @@ class Position:
         self.market_value = 0.0
     
     def update(self, quantity: float, price: float) -> None:
-        """Update position with a new transaction.
-        
-        Args:
-            quantity: Transaction quantity (positive for buy, negative for sell)
-            price: Transaction price
+        """Update state in response to a transaction fill.
+
+        :param quantity: Trade quantity (positive=buy, negative=sell).
+        :type quantity: float
+        :param price: Execution price.
+        :type price: float
+        :returns: None
+        :rtype: None
         """
         if self.quantity == 0:
             # New position
@@ -188,39 +227,51 @@ class Position:
                 self.cost_basis = price
     
     def update_market_value(self, price: float) -> None:
-        """Update position market value.
-        
-        Args:
-            price: Current market price
+        """Mark the position to ``price`` to compute current market value.
+
+        :param price: Current market price for the symbol.
+        :type price: float
+        :returns: None
+        :rtype: None
         """
         self.market_value = self.quantity * price
     
     def unrealized_pnl(self) -> float:
-        """Calculate unrealized profit/loss.
-        
-        Returns:
-            Unrealized profit/loss
+        """Return unrealized P&L based on marked value and cost basis.
+
+        :returns: Unrealized profit/loss.
+        :rtype: float
         """
         return self.market_value - (self.quantity * self.cost_basis)
 
 
 class Broker:
-    """Broker simulation for executing orders and tracking positions.
-    
-    This class simulates order execution with slippage and commission models,
-    tracks positions, and maintains transaction history.
+    """Simulated broker that executes orders and tracks positions.
+
+    The broker processes `Signal` objects into `Order` instances, applies
+    slippage and commissions, and records `Transaction` objects. It maintains
+    a simple cash and positions ledger and exposes helpers for market value
+    updates using Polars-only inputs.
     """
     
     def __init__(self, initial_cash: float = 100000.0,
                 slippage_model: Optional[SlippageModel] = None,
                 commission_model: Optional[CommissionModel] = None,
                 data_portal: Optional[object] = None):
-        """Initialize the broker.
-        
-        Args:
-            initial_cash: Initial cash balance
-            slippage_model: Slippage model for order execution
-            commission_model: Commission model for order execution
+        """Initialize the broker with optional models and a data portal.
+
+        :param initial_cash: Initial cash balance.
+        :type initial_cash: float
+        :param slippage_model: Slippage model to adjust execution prices.
+        :type slippage_model: Optional[SlippageModel]
+        :param commission_model: Commission model for trading fees.
+        :type commission_model: Optional[CommissionModel]
+        :param data_portal: Optional data portal for execution snapshots.
+        :type data_portal: Optional[object]
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> broker = Broker(initial_cash=50_000)
         """
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
@@ -235,30 +286,33 @@ class Broker:
         self._data_portal = data_portal
 
     def set_data_portal(self, data_portal) -> None:
-        """Inject a DataPortal for brokers that need to fetch market data internally."""
+        """Inject a `DataPortal` to fetch market data internally during execution.
+
+        :param data_portal: Data portal instance.
+        :type data_portal: Any
+        :returns: None
+        :rtype: None
+        """
         self._data_portal = data_portal
     
     def place_order(self, signal: Signal) -> Order:
-        """Place an order based on a signal.
-        
+        """Create and register an `Order` from a strategy `Signal`.
+
         Rules:
-          - Side is inferred solely from the sign of quantity (quantity > 0 = buy, quantity < 0 = sell).
-          - Accepts order_type from the signal as one of:
-              "market", "limit", "stop", "stop_limit", "trail_stop", "trail_stop_limit" (case-insensitive).
-          - Backward compatibility:
-              * If order_type is missing, derive from provided fields:
-                  - If stop_price present and limit_price present -> STOP_LIMIT
-                  - If stop_price present -> STOP
-                  - If trail_amount or trail_percent present -> TRAIL_STOP (or TRAIL_STOP_LIMIT if limit_price present)
-                  - Else if limit_price present -> LIMIT
-                  - Else -> MARKET
-              * Any legacy 'action' attribute is ignored for side; only quantity sign determines direction.
-          - Parameters supported on the signal:
-              limit_price (or price as alias), stop_price, trail_amount, trail_percent, trigger_on_range
-          - Brackets/OCO:
-              * If take_profit_price or stop_loss_* provided, broker creates child orders after parent fill.
-              * Children are sized to filled quantity, inherit symbol and OCO-cancel each other.
-              * stop child may be static stop, stop-limit (with stop_limit_price), or trailing (trail_amount/percent).
+          - Side derives from sign of `quantity` only.
+          - Supported explicit types: market, limit, stop, stop_limit, trail_stop, trail_stop_limit.
+          - If type is omitted, infer from provided fields (stop/limit/trailing) else default to market.
+          - Backward compatibility: `price` is accepted as alias for `limit_price`.
+          - Brackets/OCO: If take-profit or stop-loss fields are present, child orders are created when the
+            parent is fully filled and linked via OCO semantics.
+
+        :param signal: Strategy signal describing the desired order.
+        :type signal: vegas.strategy.Signal
+        :returns: The created `Order` instance.
+        :rtype: Order
+        :raises ValueError: If parameters are inconsistent with the resolved order type.
+        :Example:
+            >>> order = broker.place_order(Signal(symbol='AAPL', quantity=10))
         """
         # Quantity sign determines side; do NOT read any 'action' attribute for side
         qty_in = float(signal.quantity)
@@ -350,19 +404,24 @@ class Broker:
         return order
     
     def execute_orders(self, market_data: Dict[str, pl.DataFrame], timestamp: datetime) -> List[Transaction]:
-        """Execute pending orders based on current market data.
+        """Execute pending orders using a per-timestamp market snapshot.
 
-        Semantics:
-          - Limit: fill if price is at/through limit in favor of the order
-          - Stop / Stop-Limit: trigger when price crosses stop; then MARKET or LIMIT execution
-          - Trail orders: update trail reference (high for long, low for short), recompute dynamic stop,
-            trigger when cross; then MARKET or LIMIT based on type.
-          - Trigger evaluation: by default use bar high/low range if available (open, high, low, close).
-            If not available, use close only.
-          - Gaps: if open crosses stop, treat as triggered at open and fill with slippage at first price.
+        Execution semantics:
+          - Limit: Fill when price trades at/through the limit level favorably.
+          - Stop/Stop-Limit: Trigger on crossing stop; convert to market or limit accordingly.
+          - Trailing: Update reference (high for sell, low for buy); compute dynamic stop; trigger on cross.
+          - Range-aware evaluation uses bar high/low when available; otherwise, close-only.
+          - Gaps: If the open crosses a stop, trigger at open and fill with slippage against the first price.
 
-        Returns:
-          List of executed transactions
+        :param market_data: Mapping of symbol to Polars DataFrame slice for current timestamp.
+        :type market_data: Dict[str, polars.DataFrame]
+        :param timestamp: Current simulation timestamp.
+        :type timestamp: datetime
+        :returns: List of executed `Transaction` objects.
+        :rtype: list[Transaction]
+        :raises Exception: Execution should be resilient; errors are generally swallowed to continue loop.
+        :Example:
+            >>> fills = broker.execute_orders(market_data, ts)
         """
         executed_transactions: List[Transaction] = []
  
@@ -610,8 +669,16 @@ class Broker:
 
     # Convenience path to ensure all market data access can go through DataPortal
     def execute_orders_with_portal(self, symbols: List[str], timestamp: datetime, market_hours: Optional[tuple] = None) -> List[Transaction]:
-        """
-        Fetch the per-timestamp snapshot via DataPortal and execute orders.
+        """Fetch a snapshot via `DataPortal` and execute orders.
+
+        :param symbols: Symbols to include in the snapshot.
+        :type symbols: list[str]
+        :param timestamp: Timestamp for the snapshot.
+        :type timestamp: datetime
+        :param market_hours: Optional market hours tuple to filter the slice.
+        :type market_hours: Optional[tuple[str, str]]
+        :returns: List of executed `Transaction` objects.
+        :rtype: list[Transaction]
         """
         try:
             dp = self._data_portal
@@ -631,12 +698,16 @@ class Broker:
         return self.execute_orders(market_data_dict, timestamp)
     
     def _update_position(self, symbol: str, quantity: float, price: float) -> None:
-        """Update position for a symbol.
-        
-        Args:
-            symbol: Trading symbol
-            quantity: Transaction quantity
-            price: Transaction price
+        """Update positions dictionary for a symbol after a fill.
+
+        :param symbol: Trading symbol.
+        :type symbol: str
+        :param quantity: Quantity of the fill.
+        :type quantity: float
+        :param price: Execution price.
+        :type price: float
+        :returns: None
+        :rtype: None
         """
         if symbol not in self.positions:
             self.positions[symbol] = Position(symbol)
@@ -644,13 +715,12 @@ class Broker:
         self.positions[symbol].update(quantity, price)
     
     def cancel_order(self, order_id: str) -> bool:
-        """Cancel an open order.
-        
-        Args:
-            order_id: Order ID to cancel
-            
-        Returns:
-            True if order was cancelled, False if not found or not open
+        """Cancel an open or partially filled order by id.
+
+        :param order_id: Order identifier to cancel.
+        :type order_id: str
+        :returns: ``True`` if the order was found and cancelled; ``False`` otherwise.
+        :rtype: bool
         """
         for order in self.orders:
             if order.id == order_id and order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
@@ -659,24 +729,22 @@ class Broker:
         return False
     
     def get_position(self, symbol: str) -> Optional[Position]:
-        """Get current position for a symbol.
-        
-        Args:
-            symbol: Trading symbol
-            
-        Returns:
-            Position object or None if not found
+        """Return position object for symbol, if present.
+
+        :param symbol: Trading symbol.
+        :type symbol: str
+        :returns: `Position` or ``None`` if not found.
+        :rtype: Optional[Position]
         """
         return self.positions.get(symbol)
     
     def get_order(self, order_id: str) -> Optional[Order]:
-        """Get order by ID.
-        
-        Args:
-            order_id: Order ID
-            
-        Returns:
-            Order object or None if not found
+        """Return order by id if it exists.
+
+        :param order_id: Order identifier.
+        :type order_id: str
+        :returns: `Order` or ``None`` if not found.
+        :rtype: Optional[Order]
         """
         for order in self.orders:
             if order.id == order_id:
@@ -684,10 +752,12 @@ class Broker:
         return None
     
     def update_market_values(self, market_data: Dict[str, pl.DataFrame]) -> None:
-        """Update market values for all positions.
-        
-        Args:
-            market_data: Current market data by symbol
+        """Mark all positions to market using provided snapshot.
+
+        :param market_data: Mapping symbol -> DataFrame slice containing 'close'.
+        :type market_data: Dict[str, polars.DataFrame]
+        :returns: None
+        :rtype: None
         """
         for symbol, position in self.positions.items():
             if symbol in market_data and not market_data[symbol].is_empty():
@@ -695,19 +765,19 @@ class Broker:
                 position.update_market_value(price)
     
     def get_portfolio_value(self) -> float:
-        """Calculate total portfolio value.
-        
-        Returns:
-            Total portfolio value (cash + positions)
+        """Return total portfolio value (cash + marked positions).
+
+        :returns: Total portfolio value.
+        :rtype: float
         """
         positions_value = sum(pos.market_value for pos in self.positions.values())
         return self.cash + positions_value
     
     def get_account(self) -> Dict[str, Any]:
-        """Get account summary.
-        
-        Returns:
-            Account summary dictionary
+        """Return a simplified account summary snapshot.
+
+        :returns: Dictionary with cash, positions and portfolio_value.
+        :rtype: Dict[str, Any]
         """
         return {
             'cash': self.cash,

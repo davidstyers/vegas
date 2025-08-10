@@ -8,23 +8,16 @@ from vegas.pipeline.terms import Term
 
 
 class ZScore(CustomFactor):
-    """
-    Factor producing Z-scores for each day's cross-section.
-    
-    Z-scores are computed using:
-    
-    z = (x - mean(x)) / std(x)
-    
-    where x is the input data on a given day.
-    
-    Parameters
-    ----------
-    inputs : list, optional
-        A list of data inputs to use in compute.
-    window_length : int, optional
-        The number of rows of data to pass to compute.
-    mask : Filter, optional
-        A Filter defining values to compute.
+    """Z-score the cross-section for each day.
+
+    Z-scores are computed as z = (x - mean(x)) / std(x) within each date group.
+
+    :param term: Input term whose values will be standardized.
+    :type term: Term
+    :param mask: Optional mask to restrict computation.
+    :type mask: Optional[Filter]
+    :Example:
+        >>> z = ZScore(my_factor)
     """
     window_length = 1  # Default to 1, since we only need the most recent values
     
@@ -37,27 +30,28 @@ class ZScore(CustomFactor):
         )
     
     def to_expression(self) -> pl.Expr:
-        """
-        Compute Z-scores for the input data.
+        """Return the Polars expression computing Z-scores by date.
+
+        :returns: Polars expression of standardized values.
+        :rtype: pl.Expr
         """
         expr = self.term.to_expression()
         return (expr - expr.mean().over('date')) / (expr.std().over('date'))
 
 
 class Rank(CustomFactor):
-    """
-    Factor representing the sorted rank of each column within each row.
-    
-    Parameters
-    ----------
-    term : Term
-        The term to rank
-    method : {'ordinal', 'min', 'max', 'dense', 'average'}, optional
-        The method used to assign ranks to tied elements.
-    ascending : bool, optional
-        Whether to rank in ascending or descending order.
-    mask : Filter, optional
-        A Filter representing assets to consider when computing ranks.
+    """Rank values within each date cross-section.
+
+    :param term: Term to rank.
+    :type term: Term
+    :param method: Rank method ('ordinal', 'min', 'max', 'dense', 'average').
+    :type method: str
+    :param ascending: Whether smaller values receive lower ranks.
+    :type ascending: bool
+    :param mask: Optional mask to restrict ranking universe.
+    :type mask: Optional[Filter]
+    :Example:
+        >>> r = Rank(my_factor, method='dense', ascending=False)
     """
     window_length = 1  # Default to 1, since we only need the most recent values
     
@@ -72,22 +66,23 @@ class Rank(CustomFactor):
         )
     
     def to_expression(self) -> pl.Expr:
-        """
-        Compute ranks for the input data.
+        """Return the Polars expression computing ranks by date.
+
+        :returns: Polars expression of ranks.
+        :rtype: pl.Expr
         """
         return self.term.to_expression().rank(method=self.method, descending=not self.ascending).over('date')
 
 
 class Percentile(CustomFactor):
-    """
-    Factor representing percentiles of data.
-    
-    Parameters
-    ----------
-    term : Term
-        The term to compute percentiles for
-    mask : Filter, optional
-        A Filter representing assets to consider when computing percentiles.
+    """Percentile of a term within each date cross-section.
+
+    :param term: Term to compute percentiles for.
+    :type term: Term
+    :param mask: Optional mask to restrict computation universe.
+    :type mask: Optional[Filter]
+    :Example:
+        >>> p = Percentile(my_factor)
     """
     window_length = 1  # Default to 1, since we only need the most recent values
     
@@ -100,8 +95,10 @@ class Percentile(CustomFactor):
         )
     
     def to_expression(self) -> pl.Expr:
-        """
-        Compute percentiles for the input data.
+        """Return the Polars expression computing percentiles by date.
+
+        :returns: Polars expression of percentiles in [0,1].
+        :rtype: pl.Expr
         """
         expr = self.term.to_expression()
         return expr.rank(method='ordinal').over('date') / expr.count().over('date')

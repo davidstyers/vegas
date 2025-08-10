@@ -1,6 +1,11 @@
-"""Pipeline engine implementation for the Vegas backtesting system.
+"""Pipeline computation engine for Vegas.
 
-This module defines the PipelineEngine class that computes pipelines.
+This module implements the `PipelineEngine`, which evaluates `Pipeline`
+definitions against historical market data provided by the `DataPortal`.
+The engine is designed to be deterministic and side-effect free: it builds
+Polars expressions from `Term` objects and executes them over sanitized input
+data. Pipelines are typically computed once per simulation day by the
+`BacktestEngine` and cached for strategy access via `pipeline_output(name)`.
 """
 import pytz
 from typing import Dict, List, Optional, Union, Any, Tuple
@@ -13,42 +18,54 @@ from vegas.pipeline.terms import Term, Factor, Filter, Classifier
 
 
 class PipelineEngine:
+    """Engine responsible for evaluating `Pipeline` objects.
+
+    The engine compiles `Term` trees into Polars expressions and evaluates them
+    over the minimal lookback window required by the pipeline. Inputs are
+    sanitized for symbol dtype consistency and missing values to keep pipeline
+    results predictable and easier to consume.
+
+    Example:
+        >>> from vegas.pipeline.pipeline import Pipeline
+        >>> from vegas.pipeline.factors.basic import SimpleMovingAverage
+        >>> engine = PipelineEngine(data_portal)
+        >>> pipe = Pipeline(columns={"sma10": SimpleMovingAverage(inputs=["close"], window_length=10)})
+        >>> result = engine.run_pipeline(pipe, start_date, end_date)
     """
-    An engine for computing Pipelines.
     
-    The PipelineEngine is responsible for executing pipeline computations
-    and returning the results as a DataFrame.
-    """
-    
-    def __init__(self, data_portal):
-        """
-        Initialize a new PipelineEngine.
-        
-        Parameters
-        ----------
-        data_portal : DataPortal
-            The data portal used for accessing market data
+    def __init__(self, data_portal) -> None:
+        """Initialize a new engine bound to a `DataPortal`.
+
+        :param data_portal: Data access layer used to fetch history windows.
+        :type data_portal: vegas.data.DataPortal
+        :raises Exception: Propagates if the supplied `data_portal` is misconfigured.
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> engine = PipelineEngine(data_portal)
         """
         self.data_portal = data_portal
         self.logger = logging.getLogger('vegas.pipeline.engine')
         
     def run_pipeline(self, pipeline: Pipeline, start_date: Union[str, datetime], end_date: Union[str, datetime]) -> pl.DataFrame:
-        """
-        Compute a pipeline for a date range.
-        
-        Parameters
-        ----------
-        pipeline : Pipeline
-            The pipeline to compute
-        start_date : datetime or str
-            Start date for the computation
-        end_date : datetime or str
-            End date for the computation
-            
-        Returns
-        -------
-        pl.DataFrame
-            A DataFrame containing the computed pipeline values
+        """Compute a pipeline over a date range and return results.
+
+        The engine determines the maximal lookback required by the pipeline,
+        fetches a history window from the `DataPortal` ending at the engine's
+        current datetime, and evaluates the pipeline expressions. If a screen
+        is present, the final results are filtered accordingly.
+
+        :param pipeline: Pipeline definition containing columns and optional screen.
+        :type pipeline: vegas.pipeline.pipeline.Pipeline
+        :param start_date: Inclusive start date as `datetime` or ISO-like string.
+        :type start_date: Union[str, datetime]
+        :param end_date: Inclusive end date as `datetime` or ISO-like string.
+        :type end_date: Union[str, datetime]
+        :returns: Polars DataFrame with columns `[timestamp, symbol, *pipeline_columns]`.
+        :rtype: polars.DataFrame
+        :raises Exception: If inputs cannot be parsed or the data layer fails to provide data.
+        :Example:
+            >>> df = engine.run_pipeline(pipe, "2023-01-01", "2023-01-31")
         """
         start_date = self._to_datetime(start_date, tz=self.data_portal.timezone)
         end_date = self._to_datetime(end_date, tz=self.data_portal.timezone)
@@ -112,18 +129,14 @@ class PipelineEngine:
         return result
     
     def _get_max_window_length(self, pipeline: Pipeline) -> int:
-        """
-        Get the maximum window length required by any term in the pipeline.
-        
-        Parameters
-        ----------
-        pipeline : Pipeline
-            The pipeline to analyze
-            
-        Returns
-        -------
-        int
-            The maximum window length
+        """Return the maximum lookback window length required by a pipeline.
+
+        :param pipeline: Pipeline to analyze for window requirements.
+        :type pipeline: vegas.pipeline.pipeline.Pipeline
+        :returns: The maximum window length across all columns and screen.
+        :rtype: int
+        :Example:
+            >>> max_window = engine._get_max_window_length(pipe)
         """
         max_window = 1  # Default minimum
         
@@ -138,9 +151,18 @@ class PipelineEngine:
         return max_window
     
     def _to_datetime(self, value: Union[str, datetime, date], tz: str) -> datetime:
-        """
-        Convert supported inputs to a Python datetime object.
-        Accepts datetime, date, or ISO-like strings.
+        """Convert supported inputs to a timezone-aware ``datetime``.
+
+        :param value: Input as `datetime`, `date`, or ISO-like string.
+        :type value: Union[str, datetime, date]
+        :param tz: Target timezone name to apply.
+        :type tz: str
+        :returns: Timezone-aware datetime in the requested timezone.
+        :rtype: datetime
+        :raises TypeError: If the input type is unsupported.
+        :raises ValueError: If string parsing fails.
+        :Example:
+            >>> engine._to_datetime("2024-01-01", tz="UTC")
         """
         if isinstance(value, datetime):
             return value.astimezone(pytz.timezone(tz))

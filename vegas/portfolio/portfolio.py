@@ -12,7 +12,7 @@ EPS = 1e-6
 
 
 class Position:
-    """A class representing a portfolio position (long or short)."""
+    """Representation of a single portfolio position (long or short)."""
     def __init__(self, symbol: str, quantity: float, value: float = 0.0):
         self.symbol = symbol
         self.quantity = quantity  # negative quantity represents a short
@@ -26,7 +26,13 @@ class Position:
 
 
 class Portfolio:
-    """Portfolio tracking system for the Vegas event-driven backtesting engine."""
+    """Portfolio accounting and state management for backtests.
+
+    Tracks cash, positions, average prices, equity history, and applies a
+    simple Reg T approximation for short margin and buying power. The
+    portfolio consults the injected `DataPortal` for pricing when updating
+    from transactions.
+    """
     def __init__(self, initial_capital: float = 100000.0, data_portal=None):
         self.initial_capital = initial_capital
         self.current_cash = initial_capital
@@ -59,19 +65,13 @@ class Portfolio:
         self._data_portal = data_portal
 
     def set_account_snapshot(self, cash: float, positions_dict: Dict[str, Dict[str, float]]) -> None:
-        """
-        Seed the portfolio state from an external brokerage account snapshot.
+        """Seed portfolio from an external brokerage snapshot.
 
-        positions_dict format:
-          {
-            "AAPL": {"quantity": 10.0, "avg_price": 180.0},
-            "MSFT": {"quantity": -5.0, "avg_price": 410.0},
-            ...
-          }
+        Positions dict example:
+            {'AAPL': {'quantity': 10.0, 'avg_price': 180.0}, 'MSFT': {'quantity': -5.0, 'avg_price': 410.0}}
 
-        - Sets current_cash to the provided cash
-        - Sets positions and avg_price using the provided snapshot
-        - Recomputes equity using last-known prices (falls back to avg_price if no price yet)
+        - Sets cash and loads positions and average prices
+        - Recomputes equity from snapshot values
         - Marks portfolio as seeded from snapshot
         """
         try:
@@ -108,11 +108,11 @@ class Portfolio:
         # We avoid adding a timestamped equity row here to let engine add the first bar state.
 
     def _recompute_short_margin_and_buying_power(self):
-        """Recompute short margin requirement and buying power using Reg T approximation.
+        """Recompute short margin requirement and buying power (Reg T approximation).
 
-        Reg T short initial margin: 150% of current short market value.
-        Requirement = 1.5 * sum(|qty| * price) for all short positions.
-        Buying power = current_cash + long_market_value - requirement.
+        - Short initial margin approximated as 150% of current short market value
+        - Requirement = 1.5 * sum(|qty| * price) across shorts
+        - Buying power = current_cash + long_market_value - requirement
         """
         total_short_market_value = 0.0
         total_long_market_value = 0.0
@@ -129,11 +129,11 @@ class Portfolio:
         self.buying_power = self.current_cash + total_long_market_value - self.short_margin_requirement
 
     def _adjust_for_buying_power(self, symbol: str, quantity: float, price: float, commission: float) -> float:
-        """Adjust order quantity to respect buying power with Reg T margin for shorts.
+        """Adjust order size to respect cash/margin constraints.
 
-        For longs: require cash >= qty*price + commission (existing approach).
-        For shorts: require buying_power >= delta_requirement where
-          delta_requirement = 1.5 * (abs(new_short_mv) - abs(old_short_mv_for_symbol))
+        Longs: require cash >= qty*price + commission.
+        Shorts: require additional short requirement delta to be <= buying_power,
+        where delta = 1.5 * (|new_short_mv| - |old_short_mv|).
         """
         if quantity > 0:
             # Long buy check against cash
@@ -195,12 +195,12 @@ class Portfolio:
         return adjusted_qty
 
     def update_from_transactions(self, timestamp, transactions, market_data: Optional[pl.DataFrame] = None):
-        """Update portfolio based on executed transactions using DataPortal for pricing.
+        """Update state from executed transactions and revalue the portfolio.
 
         Notes:
-        - The `market_data` parameter is ignored; all pricing comes from the injected DataPortal.
-        - `transactions` has columns: symbol, quantity, price, commission.
-        - Allows short-selling with Reg T 150% initial margin.
+        - `market_data` is ignored; prices come from the injected `DataPortal`.
+        - `transactions` must have: symbol, quantity, price, commission.
+        - Supports short-selling with Reg T 150% initial margin approximation.
         """
 
         def _format_trade_message(trade):

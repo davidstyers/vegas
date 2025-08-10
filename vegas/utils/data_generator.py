@@ -22,18 +22,25 @@ def generate_synthetic_data(
     seed: Optional[int] = 42
 ) -> Dict[str, pd.DataFrame]:
     """Generate synthetic OHLCV data for a list of symbols.
-    
-    Args:
-        symbols: List of symbols to generate data for
-        start_date: Start date for the data
-        end_date: End date for the data
-        freq: Data frequency (default: '1H' for hourly)
-        base_price: Base price for the data (default: 100.0)
-        volatility: Daily volatility (default: 0.01 or 1%)
-        seed: Random seed for reproducibility (default: 42)
-        
-    Returns:
-        Dictionary mapping symbols to DataFrames with OHLCV data
+
+    :param symbols: Symbols to generate data for.
+    :type symbols: list[str]
+    :param start_date: Start datetime for the series.
+    :type start_date: datetime
+    :param end_date: End datetime for the series.
+    :type end_date: datetime
+    :param freq: Pandas frequency string (e.g., '1H' for hourly).
+    :type freq: str
+    :param base_price: Base price around which random walk evolves.
+    :type base_price: float
+    :param volatility: Per-period volatility used for returns.
+    :type volatility: float
+    :param seed: Random seed for reproducibility.
+    :type seed: Optional[int]
+    :returns: Mapping symbol -> pandas DataFrame of OHLCV.
+    :rtype: Dict[str, pandas.DataFrame]
+    :Example:
+        >>> data = generate_synthetic_data(['AAPL'], datetime(2022,1,1), datetime(2022,1,31))
     """
     if seed is not None:
         np.random.seed(seed)
@@ -80,10 +87,13 @@ def save_to_csv_zstd(
     output_path: str
 ) -> None:
     """Save synthetic data to a Zstandard-compressed CSV file.
-    
-    Args:
-        data_dict: Dictionary mapping symbols to DataFrames with OHLCV data
-        output_path: Path to save the compressed CSV file
+
+    :param data_dict: Mapping symbol -> pandas DataFrame with OHLCV data.
+    :type data_dict: Dict[str, pd.DataFrame]
+    :param output_path: Destination path for compressed CSV.
+    :type output_path: str
+    :returns: None
+    :rtype: None
     """
     # Combine all DataFrames
     combined_df = pd.concat(data_dict.values(), ignore_index=True)
@@ -105,10 +115,12 @@ def save_to_csv_zstd(
 
 
 def generate_sample_dataset(output_path: str = 'data/sample_data.csv.zst') -> None:
-    """Generate a sample dataset for testing.
-    
-    Args:
-        output_path: Path to save the compressed CSV file (default: 'data/sample_data.csv.zst')
+    """Generate a sample dataset for testing and write to `output_path`.
+
+    :param output_path: Destination path for compressed CSV.
+    :type output_path: str
+    :returns: None
+    :rtype: None
     """
     # Define parameters
     symbols = [

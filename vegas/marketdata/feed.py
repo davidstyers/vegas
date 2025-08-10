@@ -7,9 +7,11 @@ import polars as pl
 
 
 class MarketDataFeed:
-    """
-    Abstract market data feed interface producing per-timestamp slices.
-    All implementations must operate solely with polars DataFrame objects.
+    """Abstract market data feed producing per-timestamp slices.
+
+    Implementations must operate solely with Polars `DataFrame` objects to
+    match the rest of the engine. Feeds can be pull-based (via `next_bar()`)
+    or push-based (via `on_bar()` registrations).
     """
 
     def subscribe(self, symbols: List[str], fields: Optional[List[str]] = None) -> None:
@@ -22,9 +24,11 @@ class MarketDataFeed:
         raise NotImplementedError
 
     def next_bar(self) -> Optional[Tuple[datetime, pl.DataFrame]]:
-        """
-        Return the next (timestamp, polars.DataFrame) slice or None when exhausted.
-        DataFrame should mirror the current engine expectation (per-timestamp rows).
+        """Return the next `(timestamp, DataFrame)` slice or ``None`` when exhausted.
+
+        The DataFrame should contain rows for the current timestamp across all
+        subscribed symbols and mirror engine expectations (columns like
+        'timestamp', 'symbol', 'open', 'high', 'low', 'close', 'volume').
         """
         raise NotImplementedError
 
@@ -35,8 +39,12 @@ class MarketDataFeed:
         return False
 
     def on_bar(self, callback: Callable[[datetime, pl.DataFrame], None]) -> None:
-        """
-        Optional callback registration for push-based feeds.
+        """Register a push-based callback invoked for each new bar.
+
+        :param callback: Callable accepting `(timestamp, DataFrame)`.
+        :type callback: Callable[[datetime, pl.DataFrame], None]
+        :returns: None
+        :rtype: None
         """
         self._on_bar_cb = callback  # type: ignore[attr-defined]
 
@@ -45,9 +53,10 @@ class MarketDataFeed:
 
 
 class HistoricalFeedAdapter(MarketDataFeed):
-    """
-    Adapter that materializes historical data through the existing DataLayer path
-    and yields per-timestamp slices equivalent to the current BacktestEngine iteration.
+    """Adapter that yields historical slices equivalent to engine iteration.
+
+    Materializes data via `DataLayer`/`DataPortal` and produces a sequence of
+    per-timestamp Polars DataFrame slices that match `BacktestEngine`'s needs.
     """
 
     def __init__(

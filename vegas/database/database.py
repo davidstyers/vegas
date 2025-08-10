@@ -21,13 +21,18 @@ import shutil
 
 
 class ParquetManager:
-    """Manager for Parquet file operations."""
+    """Utility for Parquet file I/O and partitioned dataset management.
+
+    Ensures directories exist, writes Polars DataFrames to Parquet using
+    sensible defaults, and can materialize partitioned datasets while guarding
+    against excessive partition counts.
+    """
     
     def __init__(self, data_dir: str = "db"):
-        """Initialize the ParquetManager.
-        
-        Args:
-            data_dir: Directory for storing Parquet files
+        """Initialize the manager with a base data directory.
+
+        :param data_dir: Directory used for reading/writing Parquet files.
+        :type data_dir: str
         """
         self.data_dir = data_dir
         self.logger = logging.getLogger("vegas.database.parquet")
@@ -38,14 +43,15 @@ class ParquetManager:
         os.makedirs(os.path.join(self.data_dir, "partitioned"), exist_ok=True)
     
     def write_dataframe_to_parquet(self, df: pl.DataFrame, file_path: str) -> str:
-        """Write a DataFrame to a Parquet file.
-        
-        Args:
-            df: DataFrame to write
-            file_path: Path to write the Parquet file
-            
-        Returns:
-            Path to the written file
+        """Write a Polars `DataFrame` to a Parquet file and return the path.
+
+        :param df: DataFrame to write.
+        :type df: pl.DataFrame
+        :param file_path: Destination file path.
+        :type file_path: str
+        :returns: Path to the written file.
+        :rtype: str
+        :raises Exception: Propagates write errors.
         """
         # Make sure the directory exists
         directory = os.path.dirname(file_path)
@@ -59,14 +65,15 @@ class ParquetManager:
         return file_path
     
     def write_data_partitioned(self, df: pl.DataFrame, partition_cols: List[str]) -> List[str]:
-        """Write data partitioned by specified columns.
-        
-        Args:
-            df: DataFrame to write
-            partition_cols: Columns to partition by
-            
-        Returns:
-            List of paths to written files
+        """Write a dataset partitioned by specific columns and return file paths.
+
+        :param df: DataFrame to write.
+        :type df: pl.DataFrame
+        :param partition_cols: Columns used to partition the dataset.
+        :type partition_cols: list[str]
+        :returns: List of written Parquet file paths.
+        :rtype: list[str]
+        :raises ValueError: If any partition columns are missing.
         """
         if df.is_empty():
             self.logger.warning("Empty DataFrame provided, nothing to write")
@@ -127,13 +134,13 @@ class ParquetManager:
         return parquet_files
     
     def read_parquet_file(self, file_path: str) -> pl.DataFrame:
-        """Read a Parquet file into a DataFrame.
-        
-        Args:
-            file_path: Path to the Parquet file
-            
-        Returns:
-            DataFrame with the file contents
+        """Read a Parquet file into a Polars DataFrame.
+
+        :param file_path: File path to read.
+        :type file_path: str
+        :returns: DataFrame containing the file contents.
+        :rtype: pl.DataFrame
+        :raises FileNotFoundError: If the file does not exist.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Parquet file not found: {file_path}")
@@ -144,14 +151,15 @@ class ParquetManager:
         return df
     
     def read_partitioned_dataset(self, base_dir: str = None, filters=None) -> pl.DataFrame:
-        """Read a partitioned dataset with optional filters.
-        
-        Args:
-            base_dir: Base directory of the partitioned dataset
-            filters: PyArrow filters to apply
-            
-        Returns:
-            DataFrame with the combined dataset
+        """Read a partitioned dataset and return a combined DataFrame.
+
+        :param base_dir: Base directory; defaults to `<data_dir>/partitioned`.
+        :type base_dir: Optional[str]
+        :param filters: Optional PyArrow dataset filters.
+        :type filters: Any
+        :returns: Combined DataFrame across partitions or empty if none found.
+        :rtype: pl.DataFrame
+        :raises FileNotFoundError: If the directory does not exist.
         """
         if base_dir is None:
             base_dir = os.path.join(self.data_dir, "partitioned")
@@ -224,15 +232,22 @@ class ParquetManager:
 
 
 class DatabaseManager:
-    """Manager for database operations."""
+    """Facade around DuckDB for metadata and query operations.
+
+    Manages a DuckDB connection, creates a canonical `market_data` view over
+    Parquet files, and provides convenience helpers for typical queries used by
+    the engine and CLI.
+    """
     
     def __init__(self, db_path: str = "db/vegas.duckdb", parquet_dir: str = "db", test_mode: bool = False):
-        """Initialize the DatabaseManager.
-        
-        Args:
-            db_path: Path to the DuckDB database file
-            parquet_dir: Directory for storing Parquet files
-            test_mode: If True, uses an in-memory database for testing
+        """Initialize a DuckDB-backed database manager.
+
+        :param db_path: Path to DuckDB database file (or ":memory:" in tests).
+        :type db_path: str
+        :param parquet_dir: Directory containing partitioned Parquet datasets.
+        :type parquet_dir: str
+        :param test_mode: If True, use in-memory DB and temp directory for Parquet.
+        :type test_mode: bool
         """
         self.logger = logging.getLogger("vegas.database")
         # Use the logger configured by CLI - don't add handlers
@@ -261,7 +276,7 @@ class DatabaseManager:
         self.logger.info(f"DatabaseManager initialized with database: {self.db_path}")
     
     def connect(self) -> None:
-        """Connect to the DuckDB database."""
+        """Connect to DuckDB and initialize session pragmas and schema."""
         try:
             self.conn = duckdb.connect(self.db_path)
             self.logger.info(f"Connected to DuckDB database at {self.db_path}")
@@ -288,7 +303,7 @@ class DatabaseManager:
             raise
     
     def _initialize_schema(self) -> None:
-        """Initialize the database schema."""
+        """Create base tables and materialize the `market_data` view if possible."""
         if not self.conn:
             self.connect()
             
@@ -341,7 +356,7 @@ class DatabaseManager:
             self._create_empty_market_data_view()
             
     def _create_market_data_view(self) -> None:
-        """Create a view over the partitioned Parquet files."""
+        """Create or refresh a view over the partitioned Parquet files."""
         partitioned_dir = os.path.join(self.parquet_dir, "partitioned")
         
         # Check if partitioned directory exists and has Parquet files
@@ -396,7 +411,7 @@ class DatabaseManager:
             self._create_empty_market_data_view()
     
     def _create_empty_market_data_view(self) -> None:
-        """Create an empty market_data view."""
+        """Create an empty `market_data` view with a stable schema."""
         self.conn.execute("""
         CREATE OR REPLACE VIEW market_data AS
         SELECT 
@@ -412,7 +427,7 @@ class DatabaseManager:
         self.logger.info("Created empty market_data view")
     
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection if open."""
         if self.conn:
             try:
                 self.conn.close()
@@ -422,7 +437,7 @@ class DatabaseManager:
                 self.logger.error(f"Error closing database connection: {e}")
                 
     def __del__(self):
-        """Clean up any temporary resources."""
+        """Clean up any temporary resources (test tempdirs) on deletion."""
         self.close()
         
         # Clean up temporary directories when in test mode
@@ -437,14 +452,14 @@ class DatabaseManager:
                 self.logger.warning(f"Failed to clean up test directory {self.parquet_dir}: {e}")
                 
     def execute_query(self, query: str, parameters: tuple = ()) -> duckdb.DuckDBPyRelation:
-        """Execute a SQL query and return the result relation.
-        
-        Args:
-            query: SQL query to execute
-            parameters: Optional tuple of parameters for the query
-            
-        Returns:
-            DuckDB relation object with query results
+        """Execute a SQL query and return a DuckDB relation.
+
+        :param query: SQL query string.
+        :type query: str
+        :param parameters: Optional parameter tuple.
+        :type parameters: tuple
+        :returns: DuckDB relation containing the results.
+        :rtype: duckdb.DuckDBPyRelation
         """
         if not self.conn:
             self.connect()
@@ -456,15 +471,16 @@ class DatabaseManager:
             raise
     
     def query_to_df(self, query: str, parameters: tuple = (), timezone: str = None) -> pl.DataFrame:
-        """Execute a SQL query and return results as a DataFrame.
-        
-        Args:
-            query: SQL query to execute
-            parameters: Optional tuple of parameters for the query
-            timezone: Optional timezone to apply to timestamp columns
-            
-        Returns:
-            DataFrame with query results
+        """Execute SQL and return results as a Polars DataFrame.
+
+        :param query: SQL query string.
+        :type query: str
+        :param parameters: Optional parameter tuple.
+        :type parameters: tuple
+        :param timezone: Optional timezone name for timestamp columns.
+        :type timezone: Optional[str]
+        :returns: Polars DataFrame with query results.
+        :rtype: pl.DataFrame
         """
         try:
             result = self.execute_query(query, parameters)
@@ -483,14 +499,15 @@ class DatabaseManager:
             return pl.DataFrame()
     
     def ingest_data(self, df: pl.DataFrame, source_name: str) -> int:
-        """Ingest market data into the database.
-        
-        Args:
-            df: DataFrame with market data
-            source_name: Name or identifier for the data source
-            
-        Returns:
-            Number of rows ingested
+        """Ingest market data into partitioned Parquet and register source.
+
+        :param df: DataFrame with at least ['timestamp', 'symbol'] columns.
+        :type df: pl.DataFrame
+        :param source_name: Name/identifier for the source file or stream.
+        :type source_name: str
+        :returns: Number of rows ingested.
+        :rtype: int
+        :raises ValueError: If required columns are missing.
         """
         if df.is_empty():
             self.logger.warning(f"Empty DataFrame provided for source {source_name}, nothing to ingest")
@@ -560,13 +577,14 @@ class DatabaseManager:
             raise
     
     def ingest_ohlcv_file(self, file_path: str) -> int:
-        """Ingest an OHLCV file into the database.
-        
-        Args:
-            file_path: Path to OHLCV file (.ohlcv-1h.csv.zst format)
-            
-        Returns:
-            Number of rows ingested
+        """Ingest a `.ohlcv-1h.csv.zst` file into the database.
+
+        :param file_path: Absolute or relative path to an OHLCV file.
+        :type file_path: str
+        :returns: Number of rows ingested (0 if duplicate or invalid).
+        :rtype: int
+        :raises FileNotFoundError: If the file cannot be found.
+        :raises ValueError: If the file format or columns are invalid.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"OHLCV file not found: {file_path}")
@@ -648,15 +666,16 @@ class DatabaseManager:
             raise
     
     def ingest_ohlcv_directory(self, directory: str = "data", pattern: str = "*.ohlcv-1h.csv.zst", max_files: int = None) -> int:
-        """Ingest all OHLCV files in a directory.
-        
-        Args:
-            directory: Directory containing OHLCV files
-            pattern: Glob pattern for matching files
-            max_files: Maximum number of files to ingest
-            
-        Returns:
-            Total number of rows ingested
+        """Ingest all matching OHLCV files in a directory.
+
+        :param directory: Directory to search recursively.
+        :type directory: str
+        :param pattern: Glob pattern (e.g., '*.ohlcv-1h.csv.zst').
+        :type pattern: str
+        :param max_files: Optional cap on number of files to ingest.
+        :type max_files: Optional[int]
+        :returns: Total ingested rows across new files.
+        :rtype: int
         """
         if not os.path.exists(directory) or not os.path.isdir(directory):
             raise FileNotFoundError(f"Directory not found: {directory}")
@@ -743,14 +762,10 @@ class DatabaseManager:
         return total_rows
     
     def get_available_trading_days(self) -> pl.Series:
-        """Return all UTC trading days that have any data across the entire database.
-        
-        Definition:
-          - Trading day is any unique UTC calendar date for which at least one row exists
-            in the market_data view for any symbol.
-        
-        Returns:
-          pl.Series of dtype pl.Date sorted ascending, empty if no data.
+        """Return all UTC trading days with at least one `market_data` row.
+
+        :returns: Polars Date Series sorted ascending (empty if none).
+        :rtype: pl.Series
         """
         try:
             df = self.query_to_df(
@@ -771,10 +786,10 @@ class DatabaseManager:
             return pl.Series("date", [], dtype=pl.Date)
     
     def get_available_dates(self) -> pl.DataFrame:
-        """Get the date range and day count available in the database.
-        
-        Returns:
-            DataFrame with start_date, end_date, and day_count
+        """Return earliest and latest timestamps and unique day count.
+
+        :returns: DataFrame with start_date, end_date, day_count.
+        :rtype: pl.DataFrame
         """
         try:
             result = self.query_to_df("""
@@ -795,10 +810,10 @@ class DatabaseManager:
             return pl.DataFrame({'start_date': [None], 'end_date': [None], 'day_count': [0]})
     
     def get_available_symbols(self) -> pl.DataFrame:
-        """Get the symbols available in the database.
-        
-        Returns:
-            DataFrame with symbols and their record counts
+        """Return all symbols with their record counts.
+
+        :returns: DataFrame with columns ['symbol', 'record_count'].
+        :rtype: pl.DataFrame
         """
         try:
             return self.query_to_df("""
@@ -816,17 +831,21 @@ class DatabaseManager:
     def get_market_data(self, start_date: datetime = None, end_date: datetime = None,
                       symbols: List[str] = None, timezone: str = "UTC",
                       bar_count: int = None) -> pl.DataFrame:
-        """Query market data from the database.
-        
-        Args:
-            start_date: Optional start date filter
-            end_date: Optional end date filter
-            symbols: Optional list of symbols to filter by
-            timezone: Optional timezone for timestamp columns
-            bar_count: Optional number of bars to retrieve per symbol before end_date
-            
-        Returns:
-            DataFrame with market data
+        """Query market data with flexible time and symbol filters.
+
+        :param start_date: Optional inclusive start timestamp.
+        :type start_date: Optional[datetime]
+        :param end_date: Optional inclusive end timestamp.
+        :type end_date: Optional[datetime]
+        :param symbols: Optional list of symbols to restrict results.
+        :type symbols: Optional[list[str]]
+        :param timezone: Timezone for timestamp columns in the result.
+        :type timezone: str
+        :param bar_count: If provided, return the last `bar_count` rows per symbol up to `end_date`.
+        :type bar_count: Optional[int]
+        :returns: Market data DataFrame ordered by timestamp and symbol.
+        :rtype: pl.DataFrame
+        :raises ValueError: If `bar_count` is set without `end_date`.
         """
         try:
             if bar_count is not None:
@@ -901,20 +920,16 @@ class DatabaseManager:
             return pl.DataFrame()
 
     def get_unified_timestamps(self, start_date: datetime, end_date: datetime, timezone: str = "UTC") -> pl.Series:
-        """Return a unified, unique, sorted list of timestamps across all known data tables.
- 
-        Currently, this queries the canonical `market_data` view which already
-        unions all ingested sources. If additional tables (trades, quotes, orderbook)
-        are introduced later, this method should be updated to UNION DISTINCT their
-        timestamps as well.
- 
-        Args:
-            start_date: inclusive lower bound
-            end_date: inclusive upper bound
-            timezone: target timezone for the returned timestamps
- 
-        Returns:
-            pl.Series of dtype pl.Datetime with timezone, sorted ascending, unique.
+        """Return a unique, sorted Series of timestamps across `market_data`.
+
+        :param start_date: Inclusive lower bound.
+        :type start_date: datetime
+        :param end_date: Inclusive upper bound.
+        :type end_date: datetime
+        :param timezone: Target timezone for returned timestamps.
+        :type timezone: str
+        :returns: Series of timezone-aware datetimes sorted ascending.
+        :rtype: pl.Series
         """
         try:
             df = self.query_to_df(
@@ -942,31 +957,24 @@ class DatabaseManager:
             return pl.Series("timestamp", [], dtype=pl.Datetime(time_zone=timezone))
     
     def get_data_sources(self) -> pl.DataFrame:
-        """Get information about data sources in the database.
-        
-        Returns:
-            DataFrame with data source information
+        """Return metadata for known data sources.
+
+        :returns: DataFrame with data source records.
+        :rtype: pl.DataFrame
         """
         return self.query_to_df("SELECT * FROM data_sources")
     
     def get_database_size(self) -> int:
-        """Get the size of the database file in bytes.
-        
-        Returns:
-            Database file size in bytes
-        """
+        """Return the DuckDB file size in bytes (0 if absent)."""
         if os.path.exists(self.db_path):
             return os.path.getsize(self.db_path)
         return 0 
         
     def cleanup_duplicate_data(self) -> int:
-        """Clean up duplicate data entries from the database.
-        
-        This method identifies and removes duplicate entries based on timestamp and symbol.
-        It's useful after multiple data imports that might have introduced duplicates.
-        
-        Returns:
-            Number of duplicate rows removed
+        """Detect duplicates and provide guidance for de-duplication workflow.
+
+        :returns: Estimated number of duplicate rows detected.
+        :rtype: int
         """
         try:
             self.logger.info("Starting duplicate data cleanup...")

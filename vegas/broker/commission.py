@@ -11,12 +11,12 @@ class CommissionModel(ABC):
     """Abstract base class for commission models."""
     @abstractmethod
     def calculate_commission(self, price: float, quantity: float) -> float:
-        """Calculate commission for an order."""
+        """Return commission for an order of `quantity` at `price`."""
         raise NotImplementedError
 
 
 class FixedCommissionModel(CommissionModel):
-    """Fixed commission model (fixed fee per trade)."""
+    """Fixed commission model charging a constant fee per trade."""
     def __init__(self, commission: float = 5.0):
         self.commission = commission
     
@@ -25,7 +25,7 @@ class FixedCommissionModel(CommissionModel):
 
 
 class PerShareCommissionModel(CommissionModel):
-    """Per-share commission model with optional minimum trade cost."""
+    """Per-share commission model with optional minimum charge."""
     def __init__(self, cost_per_share: float = 0.005, min_trade_cost: float = 1.0):
         self.cost_per_share = cost_per_share
         self.min_trade_cost = min_trade_cost
@@ -57,7 +57,11 @@ class PercentageCommissionModel(CommissionModel):
 
 # Zipline-like helper namespace for strategies
 class commission:
-    """Helper to allow strategy usage: context.set_commission(commission.PerShare(...))."""
+    """Helper namespace for strategies to construct commission models.
+
+    Example:
+        >>> context.set_commission(commission.PerShare(0.005, 1.0))
+    """
     @staticmethod
     def Fixed(commission: float = 5.0) -> CommissionModel:
         return FixedCommissionModel(commission=commission)

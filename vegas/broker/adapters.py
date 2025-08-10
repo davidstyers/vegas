@@ -7,8 +7,10 @@ import polars as pl
 
 
 class BrokerAdapter:
-    """
-    Abstract broker adapter interface.
+    """Abstract broker adapter interface for live-like execution.
+
+    Implementations wrap real or simulated brokers and expose a uniform API
+    so the engine can operate in live or paper modes with minimal changes.
     """
 
     def place_order(self, signal) -> str:
@@ -21,15 +23,11 @@ class BrokerAdapter:
         raise NotImplementedError
 
     def poll_fills(self, until: Optional[datetime] = None) -> List[Any]:
-        """
-        Return a list of fill/transaction-like records since the last poll.
-        """
+        """Return fills since last poll (implementation-defined structure)."""
         raise NotImplementedError
 
     def on_fill(self, callback) -> None:
-        """
-        Optional: register a callback invoked when fills are detected.
-        """
+        """Register a callback invoked when fills are detected."""
         self._on_fill_cb = callback  # type: ignore[attr-defined]
 
     def get_account(self) -> Dict[str, Any]:
@@ -40,9 +38,7 @@ class BrokerAdapter:
 
 
 class SimulatedBrokerAdapter(BrokerAdapter):
-    """
-    Adapter that wraps the existing Broker to provide backtest-style execution.
-    """
+    """Adapter wrapping the in-process `Broker` for backtest-style execution."""
 
     def __init__(self, broker):
         self._broker = broker
@@ -50,9 +46,7 @@ class SimulatedBrokerAdapter(BrokerAdapter):
         self._on_fill_cb = None
 
     def place_order(self, signal) -> str:
-        """
-        Delegate to broker.place_order and return order id.
-        """
+        """Delegate to underlying broker and return the created order id."""
         order = self._broker.place_order(signal)
         return getattr(order, "id", str(order))
 
@@ -67,12 +61,7 @@ class SimulatedBrokerAdapter(BrokerAdapter):
             return []
 
     def simulate_execute(self, market_data: Dict[str, "pl.DataFrame"], timestamp: datetime) -> List[Any]:
-        """
-        Execute pending orders against the provided market snapshot using
-        the underlying Broker.execute_orders and store fills locally.
-        
-        Polars-only: pass Polars DataFrames directly to the broker.
-        """
+        """Execute pending orders and store fills locally for polling."""
         transactions = self._broker.execute_orders(market_data, timestamp)
         if transactions:
             self._pending_fills.extend(transactions)
@@ -84,9 +73,7 @@ class SimulatedBrokerAdapter(BrokerAdapter):
         return transactions
 
     def poll_fills(self, until: Optional[datetime] = None) -> List[Any]:
-        """
-        Return fills captured since last poll. 'until' is accepted for parity but not used here.
-        """
+        """Return fills captured since last poll (ignoring `until`)."""
         fills = list(self._pending_fills)
         self._pending_fills.clear()
         return fills

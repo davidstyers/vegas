@@ -7,37 +7,38 @@ from vegas.pipeline.terms import Filter, Term
 
 
 class StaticAssets(Filter):
-    """
-    Filter for a static set of assets.
-    
-    Parameters
-    ----------
-    assets : list
-        List of asset symbols to include in the filter.
+    """Filter for a static allow-list of asset symbols.
+
+    :param assets: Symbols to include in the filter mask.
+    :type assets: list[str]
+    :Example:
+        >>> mask = StaticAssets(["AAPL", "MSFT"]) 
     """
     def __init__(self, assets):
         self.assets = set(assets)
         super().__init__()
         
     def to_expression(self) -> pl.Expr:
-        """
-        Determine which assets match the static list.
+        """Return a boolean expression marking static assets.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
         return pl.col('symbol').is_in(list(self.assets))
 
 
 class BinaryCompare(Filter):
-    """
-    A Filter representing a binary comparison.
-    
-    Parameters
-    ----------
-    left : Term or scalar
-        Left side of the comparison.
-    right : Term or scalar
-        Right side of the comparison.
-    op : {'<', '<=', '==', '!=', '>=', '>'}
-        The comparison operator.
+    """Filter representing a binary comparison between two values/terms.
+
+    :param left: Left operand (`Term` or scalar).
+    :type left: Term | Any
+    :param right: Right operand (`Term` or scalar).
+    :type right: Term | Any
+    :param op: Comparison operator, one of '<', '<=', '==', '!=', '>=', '>'.
+    :type op: str
+    :raises ValueError: If an unknown operator is supplied.
+    :Example:
+        >>> mask = BinaryCompare(factor, 0, '>')
     """
     def __init__(self, left, right, op):
         self.left = left
@@ -58,8 +59,11 @@ class BinaryCompare(Filter):
         super().__init__(inputs=inputs, window_length=window_length)
     
     def to_expression(self) -> pl.Expr:
-        """
-        Apply the comparison operation.
+        """Return a boolean expression for the comparison.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
+        :raises ValueError: If an unknown operator is supplied.
         """
         if isinstance(self.left, Term):
             left_expr = self.left.to_expression()
@@ -88,20 +92,21 @@ class BinaryCompare(Filter):
 
 
 class NotNaN(Filter):
-    """
-    A filter that returns True for values that are not NaN.
-    
-    Parameters
-    ----------
-    term : Term
-        The term to check for NaN values.
+    """Filter returning True where a term is not NaN.
+
+    :param term: Term whose values are tested.
+    :type term: Term
+    :Example:
+        >>> mask = NotNaN(my_factor)
     """
     def __init__(self, term):
         self.term = term
         super().__init__(inputs=[term], window_length=term.window_length)
     
     def to_expression(self) -> pl.Expr:
-        """
-        Identify values that are not NaN.
+        """Return a boolean expression for non-NaN values.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
         """
         return self.term.to_expression().is_not_nan()

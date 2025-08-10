@@ -9,10 +9,10 @@ from .base import TradingCalendar
 
 @dataclass
 class NYSECalendar(TradingCalendar):
-    """Simple NYSE calendar: Mon-Fri, 09:30-16:00 US/Eastern.
+    """NYSE-like calendar: Mon–Fri, 09:30–16:00 US/Eastern (no holidays).
 
-    Note: This implementation does not include holiday closures. For
-    production usage, extend to include an observed-holiday list.
+    Note: Holidays are not modeled. For production, extend with an observed
+    holiday list and early-closes if required by your use case.
     """
 
     name: str = "NYSE"
@@ -25,6 +25,13 @@ class NYSECalendar(TradingCalendar):
         return 570 <= minutes < 960  # 09:30-16:00
 
     def filter_timestamps(self, timestamps: pl.Series) -> pl.Series:
+        """Vectorized filtering for trading timestamps within NYSE hours.
+
+        :param timestamps: Series of datetimes to filter.
+        :type timestamps: pl.Series
+        :returns: Filtered and sorted Series of datetimes.
+        :rtype: pl.Series
+        """
         if timestamps.is_empty():
             return timestamps
         s = timestamps

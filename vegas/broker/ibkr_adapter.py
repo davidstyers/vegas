@@ -32,6 +32,7 @@ from vegas.broker.adapters import BrokerAdapter
 
 @dataclass
 class IBKRConfig:
+    """Configuration for `InteractiveBrokersBrokerAdapter` connection params."""
     host: str = "127.0.0.1"
     port: int = 7497  # TWS paper: 7497, IB Gateway paper: 4002 by default
     client_id: int = 123
@@ -39,19 +40,16 @@ class IBKRConfig:
 
 
 class _IBClientSkeleton:
-    """
-    Minimal skeleton to represent an IB client connection. In Phase 1, this does not
-    create a real socket; tests can monkeypatch methods or inject events.
-    """
+    """Minimal stand-in for an IB client connection (no real sockets)."""
     def __init__(self, config: IBKRConfig):
         self.config = config
 
 
 class InteractiveBrokersBrokerAdapter(BrokerAdapter):
-    """
-    Interactive Brokers adapter conforming to BrokerAdapter interface.
-    In Phase 1, provides in-memory queues and caches for hermetic tests, with optional
-    ibapi imports guarded. Real connection will be implemented in a later phase.
+    """Interactive Brokers adapter conforming to `BrokerAdapter` (phase 1).
+
+    Uses in-memory queues and caches for hermetic tests. Real connectivity will
+    be implemented in a future phase behind the same interface.
     """
 
     def __init__(self, config: Optional[IBKRConfig] = None):
@@ -70,10 +68,7 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
     # ---- Public BrokerAdapter API ----
 
     def place_order(self, signal) -> str:
-        """
-        Map Strategy.Signal into an order. In Phase 1, generate an id and append to open orders cache.
-        Tests can simulate a fill by pushing objects into _fills_queue.
-        """
+        """Map a `Signal` to an order id; append a lightweight open-order record."""
         order_id = f"IB-{int(datetime.utcnow().timestamp() * 1e6)}"
         # Cache a minimal open order representation
         order_repr = {
@@ -98,10 +93,7 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
         return [o for o in self._open_orders_cache if o.get("status") in ("open", "partially_filled")]
 
     def poll_fills(self, until: Optional[datetime] = None) -> List[Any]:
-        """
-        Drain fills captured since last poll.
-        Fill objects may be dicts with keys: symbol, quantity, price, commission.
-        """
+        """Drain fills captured since last poll (dicts with symbol/quantity/price/commission)."""
         fills: List[Any] = []
         try:
             while True:

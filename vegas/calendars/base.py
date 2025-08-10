@@ -8,10 +8,11 @@ import polars as pl
 
 @dataclass
 class TradingCalendar:
-    """Resolution-agnostic trading calendar operating on precise timestamps.
+    """Resolution-agnostic trading calendar for timestamp filtering.
 
-    Subclasses should implement `is_trading_time` for a single datetime and
-    may override `filter_timestamps` for vectorized performance.
+    Subclasses implement `is_trading_time(dt)` and may override
+    `filter_timestamps(series)` for vectorized performance. Calendars operate
+    on timezone-aware Python datetimes and Polars Series.
     """
 
     name: str
@@ -20,13 +21,12 @@ class TradingCalendar:
         return True
 
     def filter_timestamps(self, timestamps: pl.Series) -> pl.Series:
-        """Filter a pl.Series[Datetime] to those within valid trading periods.
+        """Return a filtered Series of timestamps within valid trading periods.
 
-        Args:
-            timestamps: Polars Series of timezone-aware datetimes.
-
-        Returns:
-            Polars Series of the same dtype, filtered and sorted.
+        :param timestamps: Polars Series of timezone-aware datetimes.
+        :type timestamps: pl.Series
+        :returns: Filtered and sorted Series of the same dtype.
+        :rtype: pl.Series
         """
         if timestamps.is_empty():
             return timestamps

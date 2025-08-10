@@ -7,42 +7,39 @@ import polars as pl
 
 
 class CustomFactor(Factor):
-    """
-    Base class for user-defined Factors.
-    
-    CustomFactors allow users to easily define their own Factors
-    by implementing a to_expression method that returns a Polars expression.
-    
-    Examples
-    --------
-    Define a simple moving average factor:
-    
-    >>> class SimpleMovingAverage(CustomFactor):
-    ...     inputs = ['close']
-    ...     window_length = 10
-    ...     def to_expression(self):
-    ...         return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
-    ...
-    >>> sma_10 = SimpleMovingAverage()
+    """Base class for user-defined numeric Factors.
+
+    Subclasses must implement `to_expression` to return a Polars expression.
+
+    Example:
+        >>> class SimpleMovingAverage(CustomFactor):
+        ...     inputs = ['close']
+        ...     window_length = 10
+        ...     def to_expression(self):
+        ...         return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
+        ...
+        >>> sma_10 = SimpleMovingAverage()
     """
     
     inputs = None
     window_length = None
     
     def __init__(self, inputs=None, window_length=None, mask=None, **kwargs):
-        """
-        Initialize a CustomFactor.
-        
-        Parameters
-        ----------
-        inputs : list, optional
-            A list of data inputs to use in compute.
-        window_length : int, optional
-            The number of rows of data to pass to compute.
-        mask : Filter, optional
-            A Filter defining values to compute.
-        **kwargs
-            Additional keyword arguments.
+        """Initialize a `CustomFactor`.
+
+        :param inputs: Input column names or `Term` objects.
+        :type inputs: list | None
+        :param window_length: Number of rows included in the window.
+        :type window_length: int | None
+        :param mask: Optional mask defining the computation universe.
+        :type mask: Optional[vegas.pipeline.terms.Filter]
+        :param kwargs: Additional attributes to set on the instance.
+        :type kwargs: dict
+        :raises ValueError: If subclass fails to supply required `inputs` or `window_length`.
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> cf = CustomFactor(inputs=['close'], window_length=5)
         """
         if inputs is None:
             if self.inputs is None:
@@ -66,4 +63,10 @@ class CustomFactor(Factor):
             setattr(self, k, v)
 
     def to_expression(self) -> pl.Expr:
+        """Return the Polars expression implementing the factor.
+
+        :returns: Polars expression to be evaluated by the pipeline engine.
+        :rtype: pl.Expr
+        :raises NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError("CustomFactor subclasses must implement to_expression")

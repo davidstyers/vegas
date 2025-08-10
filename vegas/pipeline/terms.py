@@ -7,26 +7,27 @@ import polars as pl
 
 
 class Term:
-    """
-    Base class for all Pipeline computations.
-    
-    Terms are the core building blocks for pipeline expressions.
+    """Base class for all pipeline computations.
+
+    Terms form the nodes of expression trees compiled by the pipeline engine
+    into Polars expressions. Subclasses implement `to_expression`.
     """
     def __init__(self,
                  inputs: Optional[List['Term']] = None,
                  window_length: int = 1,
                  mask: Optional['Filter'] = None):
-        """
-        Initialize a Term with inputs and parameters.
-        
-        Parameters
-        ----------
-        inputs : list of Terms, optional
-            Terms whose outputs should be provided to this Term's compute function
-        window_length : int, optional
-            Number of rows of historical data to load for each compute
-        mask : Filter, optional
-            A Filter defining values to compute
+        """Initialize a `Term` with optional inputs and mask.
+
+        :param inputs: Input terms whose values are required to compute this term.
+        :type inputs: Optional[list[Term]]
+        :param window_length: Number of rows of historical data needed.
+        :type window_length: int
+        :param mask: Optional filter defining the computation universe.
+        :type mask: Optional[Filter]
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> t = Term(inputs=[], window_length=1)
         """
         self.inputs = inputs or []
         self.window_length = window_length
@@ -34,22 +35,15 @@ class Term:
         self.name = None
         
     def to_expression(self) -> pl.Expr:
-        """
-        Calculate values for this Term.
-        
-        This method is called with raw data for all inputs and must write
-        output values into the `out` array.
-        
-        Parameters
-        ----------
-        today : pd.Timestamp
-            The day for which values are being computed
-        assets : np.array[int64]
-            The assets for which values are requested
-        out : np.array
-            Output array of the same shape as assets
-        *inputs : tuple of np.array
-            Raw data arrays for any inputs to this Term
+        """Return the Polars expression computing this term.
+
+        Subclasses must override and build a valid `pl.Expr` that the engine can
+        evaluate. The expression should rely on column references provided by the
+        engine (e.g., 'symbol', 'timestamp', or input-specific columns).
+
+        :returns: Polars expression computing term values.
+        :rtype: pl.Expr
+        :raises NotImplementedError: If the subclass does not implement this method.
         """
         raise NotImplementedError("Term subclasses must implement to_expression")
     
@@ -85,11 +79,11 @@ class Term:
 
 
 class Factor(Term):
-    """
-    A Term that computes a numerical result for each asset on each day.
-    
-    Factors are the most common type of Pipeline expression, representing
-    quantities like momentum, volatility, etc.
+    """Numeric term producing per-asset values for each date.
+
+    Factors are used for quantities such as momentum, volatility, etc. They
+    support arithmetic operators and helper constructors like `rank`, `top`,
+    and `bottom` to compose new terms fluently.
     """
 
     def __add__(self, other) -> 'Factor':
@@ -109,98 +103,80 @@ class Factor(Term):
         return BinaryFactor(self, other, '/')
 
     def rank(self, method='ordinal', ascending=True, mask=None) -> 'Factor':
-        """
-        Construct a new Factor representing the sorted rank of each column within each row.
-        
-        Parameters
-        ----------
-        method : str, {'ordinal', 'min', 'max', 'dense', 'average'}, optional
-            The method used to assign ranks to tied elements.
-        ascending : bool, optional
-            Whether to rank in ascending or descending order.
-        mask : Filter, optional
-            A Filter representing assets to consider when computing ranks.
-            
-        Returns
-        -------
-        Factor
-            A new factor that will compute the ranking.
+        """Return a factor whose values are the cross-sectional ranks.
+
+        :param method: Rank method ('ordinal', 'min', 'max', 'dense', 'average').
+        :type method: str
+        :param ascending: Whether ranks are ascending (smallest=1).
+        :type ascending: bool
+        :param mask: Optional mask to restrict the ranking universe.
+        :type mask: Optional[Filter]
+        :returns: New `Factor` computing ranks per date.
+        :rtype: Factor
+        :Example:
+            >>> f.rank(method='dense', ascending=False)
         """
         from vegas.pipeline.factors import Rank
         return Rank(self, method=method, ascending=ascending, mask=mask or self.mask)
     
     def top(self, N, mask=None) -> 'Filter':
-        """
-        Construct a Filter matching the top N asset values of self each day.
-        
-        Parameters
-        ----------
-        N : int
-            Number of assets passing the filter each day.
-        mask : Filter, optional
-            A Filter representing assets to consider when computing ranks.
-            
-        Returns
-        -------
-        Filter
-            A filter matching the top N assets.
+        """Return a filter matching the top-N assets by the factor each day.
+
+        :param N: Number of assets to pass the filter each day.
+        :type N: int
+        :param mask: Optional mask to restrict the ranking universe.
+        :type mask: Optional[Filter]
+        :returns: Filter selecting the top N assets.
+        :rtype: Filter
+        :Example:
+            >>> f.top(50)
         """
         # Use a dedicated TopN filter over the factor directly.
         from vegas.pipeline.filters.advanced import TopN
         return TopN(self, int(N), ascending=False, mask=mask or self.mask)
     
     def bottom(self, N, mask=None) -> 'Filter':
-        """
-        Construct a Filter matching the bottom N asset values of self each day.
-        
-        Parameters
-        ----------
-        N : int
-            Number of assets passing the filter each day.
-        mask : Filter, optional
-            A Filter representing assets to consider when computing ranks.
-            
-        Returns
-        -------
-        Filter
-            A filter matching the bottom N assets.
+        """Return a filter matching the bottom-N assets by the factor each day.
+
+        :param N: Number of assets to pass the filter each day.
+        :type N: int
+        :param mask: Optional mask to restrict the ranking universe.
+        :type mask: Optional[Filter]
+        :returns: Filter selecting the bottom N assets.
+        :rtype: Filter
+        :Example:
+            >>> f.bottom(50)
         """
         from vegas.pipeline.filters.advanced import TopN
         return TopN(self, int(N), ascending=True, mask=mask or self.mask)
     
     def zscore(self, mask=None) -> 'Factor':
-        """
-        Construct a Factor that Z-Scores each day's results.
-        
-        Parameters
-        ----------
-        mask : Filter, optional
-            A Filter defining values to include when computing Z-Scores.
-            
-        Returns
-        -------
-        Factor
-            A Factor producing Z-scored values.
+        """Return a factor that Z-scores each day's cross-section.
+
+        :param mask: Optional mask defining values to include.
+        :type mask: Optional[Filter]
+        :returns: Factor producing standardized values.
+        :rtype: Factor
+        :Example:
+            >>> f.zscore()
         """
         from vegas.pipeline.factors.statistical import ZScore
         return ZScore(self, mask=mask or self.mask)
 
 
 class BinaryFactor(Factor):
-    """
-    A Factor that applies a binary operator to two inputs.
-    """
+    """Factor produced by applying a binary operator to two inputs."""
     
     def __init__(self, left, right, op):
-        """
-        Parameters
-        ----------
-        left : Factor or scalar
-            Left operand.
-        right : Factor or scalar
-            Right operand.
-        op : str
-            Binary operator to apply.
+        """Initialize a `BinaryFactor`.
+
+        :param left: Left operand as `Term` or scalar.
+        :type left: Term | Any
+        :param right: Right operand as `Term` or scalar.
+        :type right: Term | Any
+        :param op: Binary operator, one of '+', '-', '*', '/'.
+        :type op: str
+        :raises ValueError: If an unknown operator is supplied.
         """
         self.left = left
         self.right = right
@@ -214,7 +190,12 @@ class BinaryFactor(Factor):
         super().__init__(inputs=inputs, window_length=window_length)
         
     def to_expression(self) -> pl.Expr:
-        """Apply the binary operation to inputs."""
+        """Return the Polars expression applying the operator to inputs.
+
+        :returns: Polars expression for the binary operation.
+        :rtype: pl.Expr
+        :raises ValueError: If an unknown operator is supplied.
+        """
         if isinstance(self.left, Term):
             left_expr = self.left.to_expression()
         else:
@@ -238,11 +219,7 @@ class BinaryFactor(Factor):
 
 
 class Filter(Term):
-    """
-    A Term that computes a boolean result for each asset on each day.
-    
-    Filters are used to exclude or include assets based on various criteria.
-    """
+    """Boolean term used to include/exclude assets based on criteria."""
     
     def __and__(self, other) -> 'Filter':
         """Binary operator &"""
@@ -258,20 +235,18 @@ class Filter(Term):
 
 
 class BinaryFilter(Filter):
-    """
-    A Filter that combines two filters with a binary operator.
-    """
+    """Filter combining two inputs with a binary boolean operator."""
     
     def __init__(self, left, right, op):
-        """
-        Parameters
-        ----------
-        left : Filter
-            Left operand.
-        right : Filter
-            Right operand.
-        op : str
-            Binary operator to apply ('&' or '|').
+        """Initialize a `BinaryFilter`.
+
+        :param left: Left filter operand.
+        :type left: Filter
+        :param right: Right filter operand.
+        :type right: Filter
+        :param op: Binary boolean operator ('&' or '|').
+        :type op: str
+        :raises ValueError: If an unknown operator is supplied.
         """
         self.left = left
         self.right = right
@@ -285,7 +260,12 @@ class BinaryFilter(Filter):
         super().__init__(inputs=inputs, window_length=window_length)
         
     def to_expression(self) -> pl.Expr:
-        """Apply the binary operation to inputs, producing a strict boolean mask."""
+        """Return a boolean Polars expression applying the binary operator.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
+        :raises ValueError: If an unknown operator is supplied.
+        """
         if isinstance(self.left, Term):
             left_expr = self.left.to_expression()
         else:
@@ -305,25 +285,28 @@ class BinaryFilter(Filter):
 
 
 class UnaryFilter(Filter):
-    """
-    A Filter that applies a unary operator to an input filter.
-    """
+    """Filter applying a unary boolean operator to another filter."""
     
     def __init__(self, input_filter, op):
-        """
-        Parameters
-        ----------
-        input_filter : Filter
-            The filter to apply the unary operator to.
-        op : str
-            Unary operator to apply ('~').
+        """Initialize a `UnaryFilter`.
+
+        :param input_filter: Input filter operand.
+        :type input_filter: Filter
+        :param op: Unary operator ('~').
+        :type op: str
+        :raises ValueError: If an unknown operator is supplied.
         """
         self.input_filter = input_filter
         self.op = op
         super().__init__(inputs=[input_filter], window_length=input_filter.window_length)
         
     def to_expression(self) -> pl.Expr:
-        """Apply the unary operation to input, producing strict boolean mask."""
+        """Return a boolean expression applying the unary operator.
+
+        :returns: Polars boolean expression.
+        :rtype: pl.Expr
+        :raises ValueError: If an unknown operator is supplied.
+        """
         if self.op == '~':
             return ~self.input_filter.to_expression()
         else:
@@ -331,10 +314,6 @@ class UnaryFilter(Filter):
 
 
 class Classifier(Term):
-    """
-    A Term that groups assets into categories.
-    
-    Classifiers are used to group assets by shared characteristics like sector.
-    """
+    """Term that groups assets into categories (e.g., sector identifiers)."""
     dtype = pl.Int64
     missing_value = -1
