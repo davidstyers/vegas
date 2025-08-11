@@ -2,8 +2,12 @@
 
 This module defines the CustomFactor class that allows users to create their own factors.
 """
-from vegas.pipeline.terms import Factor
+
+from typing import Any, ClassVar, Optional, Sequence
+
 import polars as pl
+
+from vegas.pipeline.terms import Factor
 
 
 class CustomFactor(Factor):
@@ -19,12 +23,21 @@ class CustomFactor(Factor):
         ...         return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
         ...
         >>> sma_10 = SimpleMovingAverage()
+
     """
-    
-    inputs = None
-    window_length = None
-    
-    def __init__(self, inputs=None, window_length=None, mask=None, **kwargs):
+
+    # Class-level defaults that strategy authors override in subclasses.
+    # These are class variables on purpose and do not conflict with Term instance attributes.
+    inputs: ClassVar[Optional[Sequence[str]]] = None
+    window_length: ClassVar[Optional[int]] = None
+
+    def __init__(
+        self,
+        inputs: Optional[Sequence[str]] = None,
+        window_length: Optional[int] = None,
+        mask: Optional[object] = None,
+        **kwargs: Any,
+    ) -> None:
         """Initialize a `CustomFactor`.
 
         :param inputs: Input column names or `Term` objects.
@@ -48,7 +61,7 @@ class CustomFactor(Factor):
                     "class attribute or parameter to __init__"
                 )
             inputs = self.inputs
-            
+
         if window_length is None:
             if self.window_length is None:
                 raise ValueError(
@@ -56,9 +69,10 @@ class CustomFactor(Factor):
                     "class attribute or parameter to __init__"
                 )
             window_length = self.window_length
-        
-        super().__init__(inputs=inputs, window_length=window_length, mask=mask)
-        
+
+        # Pass through to Term with the resolved values.
+        super().__init__(inputs=inputs, window_length=int(window_length), mask=mask)
+
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -69,4 +83,6 @@ class CustomFactor(Factor):
         :rtype: pl.Expr
         :raises NotImplementedError: Must be implemented by subclasses.
         """
-        raise NotImplementedError("CustomFactor subclasses must implement to_expression")
+        raise NotImplementedError(
+            "CustomFactor subclasses must implement to_expression"
+        )

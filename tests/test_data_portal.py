@@ -1,5 +1,6 @@
-import polars as pl
 from datetime import datetime, timedelta
+
+import polars as pl
 
 from vegas.data.data_portal import DataPortal
 
@@ -15,15 +16,17 @@ class MockDataLayer:
         rows = []
         for sym, starts in [("A", 50.0), ("B", 100.0)]:
             for i, t in enumerate(ts):
-                rows.append({
-                    "timestamp": t,
-                    "symbol": sym,
-                    "open": starts + i,
-                    "high": starts + i + 0.5,
-                    "low": starts + i - 0.5,
-                    "close": starts + i + 0.25,
-                    "volume": 1000 + 10 * i,
-                })
+                rows.append(
+                    {
+                        "timestamp": t,
+                        "symbol": sym,
+                        "open": starts + i,
+                        "high": starts + i + 0.5,
+                        "low": starts + i - 0.5,
+                        "close": starts + i + 0.25,
+                        "volume": 1000 + 10 * i,
+                    }
+                )
         return pl.from_dicts(rows)
 
     def get_unified_timestamp_index(self, start, end):
@@ -36,7 +39,7 @@ def test_load_and_slice_history_and_spot_value():
 
     start = datetime(2025, 6, 2, 4)
     end = datetime(2025, 6, 2, 7)
-    dp.load_data(start, end, symbols=["A", "B"], frequencies=["1h"]) 
+    dp.load_data(start, end, symbols=["A", "B"], frequencies=["1h"])
 
     # get_slice_for_timestamp should return rows for both symbols
     ts = datetime(2025, 6, 2, 6)
@@ -46,7 +49,9 @@ def test_load_and_slice_history_and_spot_value():
 
     # history rolling window per symbol with explicit end_dt
     dp.set_current_dt(end)
-    h = dp.history(assets=["A", "B"], fields=["close"], bar_count=2, frequency="1h", end_dt=end)
+    h = dp.history(
+        assets=["A", "B"], fields=["close"], bar_count=2, frequency="1h", end_dt=end
+    )
     assert not h.is_empty()
     # Should have last two bars per symbol -> 4 rows total
     assert h.height == 4
@@ -55,5 +60,3 @@ def test_load_and_slice_history_and_spot_value():
     v = dp.get_spot_value("A", "close", ts, frequency="1h")
     assert isinstance(v, float)
     assert v > 0
-
-

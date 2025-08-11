@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+
 import polars as pl
 
 from .base import TradingCalendar
@@ -17,7 +18,9 @@ class NYSECalendar(TradingCalendar):
 
     name: str = "NYSE"
 
-    def is_trading_time(self, dt: datetime) -> bool:  # pragma: no cover - vectorized path used
+    def is_trading_time(
+        self, dt: datetime
+    ) -> bool:  # pragma: no cover - vectorized path used
         weekday = dt.weekday()  # 0=Mon..6=Sun
         if weekday >= 5:
             return False
@@ -41,4 +44,3 @@ class NYSECalendar(TradingCalendar):
         minutes = (s.dt.hour().cast(pl.Int32) * 60) + s.dt.minute().cast(pl.Int32)
         mask = (wd < 5) & minutes.is_between(570, 960, closed="left")
         return s.filter(mask).sort()
-

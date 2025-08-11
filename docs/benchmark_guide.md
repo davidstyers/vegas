@@ -136,4 +136,4 @@ python benchmark_backtester.py
 
 ### Testing Memory Efficiency
 
-Run with increasingly large datasets while monitoring memory usage to find the practical limits of your system configuration. 
+Run with increasingly large datasets while monitoring memory usage to find the practical limits of your system configuration.

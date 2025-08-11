@@ -1,5 +1,5 @@
 """Strategy implementation for the Vegas backtesting engine."""
 
-from vegas.strategy.strategy import Strategy, Signal, Context
+from vegas.strategy.strategy import Context, Signal, Strategy
 
-__all__ = ["Strategy", "Signal", "Context"] 
+__all__ = ["Strategy", "Signal", "Context"]

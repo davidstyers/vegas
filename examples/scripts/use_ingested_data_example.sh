@@ -23,4 +23,4 @@ if [ $? -eq 0 ]; then
 else
     echo
     echo "Backtest failed. Check the error messages above."
-fi 
+fi

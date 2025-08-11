@@ -11,18 +11,17 @@ Phase 1: Skeleton implementation with optional ibapi imports and safe fallbacks.
 - Public methods operate with in-memory queues so tests can inject bars hermetically.
 """
 
+import queue
+import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-import threading
-import queue
+from typing import List, Optional, Tuple
 
 import polars as pl
 
 try:
     # Optional dependency; real connectivity added in a later phase
-    from ibapi.client import EClient  # type: ignore
-    from ibapi.wrapper import EWrapper  # type: ignore
+
     _IBAPI_AVAILABLE = True
 except Exception:
     _IBAPI_AVAILABLE = False
@@ -37,12 +36,13 @@ class IBKRFeedConfig:
     Attributes mirror typical paper-trading defaults. Some fields (bar_size,
     what_to_show, use_rth) are placeholders for future live data integrations.
     """
+
     host: str = "127.0.0.1"
     port: int = 7497
     client_id: int = 124
-    bar_size: str = "1 min"      # Future use
-    what_to_show: str = "TRADES" # Future use
-    use_rth: bool = True         # Future use
+    bar_size: str = "1 min"  # Future use
+    what_to_show: str = "TRADES"  # Future use
+    use_rth: bool = True  # Future use
     timezone: str = "UTC"
 
 
@@ -77,7 +77,9 @@ class InteractiveBrokersFeed(MarketDataFeed):
             self._symbols = list(symbols)
         self._fields = fields
 
-    def start(self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None) -> None:
+    def start(
+        self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None
+    ) -> None:
         """Start the feed; in phase 1 this only toggles internal flags."""
         if self._started:
             return
@@ -144,7 +146,11 @@ class InteractiveBrokersFeed(MarketDataFeed):
         # Normalize timestamp dtype
         if "timestamp" in df.columns:
             try:
-                df = df.with_columns(pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone=self._config.timezone)))
+                df = df.with_columns(
+                    pl.col("timestamp").cast(
+                        pl.Datetime(time_unit="us", time_zone=self._config.timezone)
+                    )
+                )
             except Exception:
                 pass
         self._bars_queue.put((ts, df))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable, Optional, Tuple, List, Dict
+from typing import Callable, Dict, List, Optional, Tuple
 
 import polars as pl
 
@@ -17,7 +17,9 @@ class MarketDataFeed:
     def subscribe(self, symbols: List[str], fields: Optional[List[str]] = None) -> None:
         raise NotImplementedError
 
-    def start(self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None) -> None:
+    def start(
+        self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None
+    ) -> None:
         raise NotImplementedError
 
     def stop(self) -> None:
@@ -90,7 +92,9 @@ class HistoricalFeedAdapter(MarketDataFeed):
             self._symbols = symbols
         self._fields = fields
 
-    def start(self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None) -> None:
+    def start(
+        self, from_dt: Optional[datetime] = None, to_dt: Optional[datetime] = None
+    ) -> None:
         if self._started:
             return
         self._started = True

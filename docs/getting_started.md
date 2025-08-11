@@ -51,47 +51,47 @@ class SimpleMovingAverageStrategy(Strategy):
         context.short_window = 10
         context.long_window = 30
         context.position_size = 100
-    
+
     def generate_signals_vectorized(self, context, data):
         # Filter data for our symbols
         data = data[data['symbol'].isin(context.symbols)]
-        
+
         if data.empty:
             return pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
-        
+
         signals = []
-        
+
         # Process each symbol separately
         for symbol in data['symbol'].unique():
             symbol_data = data[data['symbol'] == symbol].sort_values('timestamp')
-            
+
             # Calculate moving averages
             symbol_data['short_ma'] = symbol_data['close'].rolling(
                 window=context.short_window).mean()
             symbol_data['long_ma'] = symbol_data['close'].rolling(
                 window=context.long_window).mean()
-            
+
             # Skip NaN values
             symbol_data = symbol_data.dropna()
-            
+
             if len(symbol_data) <= 1:
                 continue
-            
+
             # Create shifted columns to detect crossovers
             symbol_data['prev_short_ma'] = symbol_data['short_ma'].shift(1)
             symbol_data['prev_long_ma'] = symbol_data['long_ma'].shift(1)
-            
+
             # Skip the first row after shifting
             symbol_data = symbol_data.dropna()
-            
+
             # Buy signal: short MA crosses above long MA
             symbol_data['buy_signal'] = (symbol_data['prev_short_ma'] <= symbol_data['prev_long_ma']) & \
                                        (symbol_data['short_ma'] > symbol_data['long_ma'])
-            
+
             # Sell signal: short MA crosses below long MA
             symbol_data['sell_signal'] = (symbol_data['prev_short_ma'] >= symbol_data['prev_long_ma']) & \
                                         (symbol_data['short_ma'] < symbol_data['long_ma'])
-            
+
             # Generate buy signals
             buy_signals = symbol_data[symbol_data['buy_signal']].apply(
                 lambda row: {
@@ -102,7 +102,7 @@ class SimpleMovingAverageStrategy(Strategy):
                     'price': None  # Market order
                 }, axis=1
             ).tolist()
-            
+
             # Generate sell signals
             sell_signals = symbol_data[symbol_data['sell_signal']].apply(
                 lambda row: {
@@ -113,13 +113,13 @@ class SimpleMovingAverageStrategy(Strategy):
                     'price': None  # Market order
                 }, axis=1
             ).tolist()
-            
+
             signals.extend(buy_signals)
             signals.extend(sell_signals)
-        
+
         if not signals:
             return pd.DataFrame(columns=['timestamp', 'symbol', 'action', 'quantity', 'price'])
-            
+
         return pd.DataFrame(signals)
 ```
 
@@ -191,7 +191,7 @@ class MyStrategy(Strategy):
         context.symbols = ['AAPL', 'MSFT', 'GOOG']
         context.ma_window = 20
         context.position_size = 100
-    
+
     def generate_signals_vectorized(self, context, data):
         # Your strategy logic here
         # ...
@@ -219,4 +219,4 @@ For best performance with vectorized strategies:
 - Check out the [example strategies](examples.md) for more ideas
 - Learn about [advanced features](advanced_features.md)
 - Read the [API reference](api_reference.md) for detailed documentation
-- Explore the [CLI examples](../examples/README.md) for command-line usage 
+- Explore the [CLI examples](../examples/README.md) for command-line usage

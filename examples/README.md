@@ -40,7 +40,7 @@ class MyStrategy(Strategy):
         context.symbols = ['AAPL', 'MSFT', 'GOOG']
         context.lookback = 20
         context.position_size = 100
-    
+
     def generate_signals_vectorized(self, context, data):
         # Your vectorized strategy logic here
         # ...

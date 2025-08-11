@@ -21,22 +21,22 @@ Notes on interface alignment:
   for semantic clarity.
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Callable
-import threading
-import queue
 import logging
 import os
-import time
+import queue
+import threading
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     # Optional dependency; only needed for real connectivity
     from ibapi.client import EClient  # type: ignore
-    from ibapi.wrapper import EWrapper  # type: ignore
+    from ibapi.common import TickerId  # type: ignore
     from ibapi.contract import Contract  # type: ignore
     from ibapi.order import Order  # type: ignore
-    from ibapi.common import TickerId  # type: ignore
+    from ibapi.wrapper import EWrapper  # type: ignore
+
     _IBAPI_AVAILABLE = True
 except Exception:
     _IBAPI_AVAILABLE = False
@@ -55,6 +55,7 @@ class IBKRConfig:
       - IB_CLIENT_ID (default: 123)
       - IB_ACCOUNT_ID (optional)
     """
+
     host: str = "127.0.0.1"
     port: int = 7497  # TWS paper: 7497, IB Gateway paper: 4002 by default
     client_id: int = 123
@@ -69,7 +70,11 @@ class IBKRConfig:
         port = int(os.getenv("IB_PORT", "7497"))
         client_id = int(os.getenv("IB_CLIENT_ID", "123"))
         account_id = os.getenv("IB_ACCOUNT_ID")
-        auto_reconnect = os.getenv("IB_AUTO_RECONNECT", "true").lower() in ("1", "true", "yes")
+        auto_reconnect = os.getenv("IB_AUTO_RECONNECT", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         min_delay = float(os.getenv("IB_RECONNECT_MIN_DELAY", "2.0"))
         max_delay = float(os.getenv("IB_RECONNECT_MAX_DELAY", "30.0"))
         return IBKRConfig(
@@ -85,6 +90,7 @@ class IBKRConfig:
 
 class _IBClientSkeleton:
     """Minimal stand-in for an IB client connection (no real sockets)."""
+
     def __init__(self, config: IBKRConfig):
         self.config = config
 
@@ -140,7 +146,9 @@ class _IBResponseBook:
             self._account_summary[req_id] = {}
             self._account_summary_evt[req_id] = threading.Event()
 
-    def on_account_summary(self, req_id: int, tag: str, value: str, currency: str) -> None:
+    def on_account_summary(
+        self, req_id: int, tag: str, value: str, currency: str
+    ) -> None:
         with self._lock:
             if req_id not in self._account_summary:
                 self._account_summary[req_id] = {}
@@ -160,7 +168,9 @@ class _IBResponseBook:
             if evt:
                 evt.set()
 
-    def await_account_summary(self, req_id: int, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    def await_account_summary(
+        self, req_id: int, timeout: float = 5.0
+    ) -> Optional[Dict[str, Any]]:
         evt = self._account_summary_evt.get(req_id)
         if evt is None:
             return None
@@ -184,7 +194,9 @@ class _IBResponseBook:
             if evt:
                 evt.set()
 
-    def await_open_orders(self, req_id: int, timeout: float = 5.0) -> List[Dict[str, Any]]:
+    def await_open_orders(
+        self, req_id: int, timeout: float = 5.0
+    ) -> List[Dict[str, Any]]:
         evt = self._open_orders_evt.get(req_id)
         if evt is None:
             return []
@@ -208,7 +220,9 @@ class _IBResponseBook:
             if evt:
                 evt.set()
 
-    def await_positions(self, req_id: int, timeout: float = 5.0) -> List[Dict[str, Any]]:
+    def await_positions(
+        self, req_id: int, timeout: float = 5.0
+    ) -> List[Dict[str, Any]]:
         evt = self._positions_evt.get(req_id)
         if evt is None:
             return []
@@ -230,7 +244,9 @@ class _IBResponseBook:
             if sym:
                 self._symbol_to_ticker.pop(sym, None)
 
-    def on_tick(self, ticker_id: int, field_name: str, value: float) -> Optional[Tuple[str, Dict[str, Any]]]:
+    def on_tick(
+        self, ticker_id: int, field_name: str, value: float
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
         with self._lock:
             if ticker_id not in self._quotes_by_ticker:
                 self._quotes_by_ticker[ticker_id] = {}
@@ -248,15 +264,21 @@ class _IBResponseBook:
 
 
 if _IBAPI_AVAILABLE:
+
     class _IBApiApp(EWrapper, EClient):
         """Thin wrapper that forwards EWrapper callbacks into `_IBResponseBook` and queues.
 
         The broker instance provides the response book and the fills queue.
         """
 
-        def __init__(self, response_book: _IBResponseBook, fills_queue: "queue.Queue[Any]", logger: logging.Logger,
-                     on_connection_state: Optional[Callable[[str], None]] = None,
-                     on_quote: Optional[Callable[[str, Dict[str, Any]], None]] = None):
+        def __init__(
+            self,
+            response_book: _IBResponseBook,
+            fills_queue: "queue.Queue[Any]",
+            logger: logging.Logger,
+            on_connection_state: Optional[Callable[[str], None]] = None,
+            on_quote: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        ):
             EClient.__init__(self, self)
             self._resp = response_book
             self._fills_queue = fills_queue
@@ -269,10 +291,18 @@ if _IBAPI_AVAILABLE:
             self._logger.debug(f"IB nextValidId: {orderId}")
             self._resp.set_next_order_id(orderId)
 
-        def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson: str = ""):
+        def error(
+            self,
+            reqId: int,
+            errorCode: int,
+            errorString: str,
+            advancedOrderRejectJson: str = "",
+        ):
             # Common connection codes: 1100 (down), 1101/1102 (up), 502 (connect failed)
             level = logging.WARNING if errorCode >= 1000 else logging.ERROR
-            self._logger.log(level, f"IB error: reqId={reqId}, code={errorCode}, msg={errorString}")
+            self._logger.log(
+                level, f"IB error: reqId={reqId}, code={errorCode}, msg={errorString}"
+            )
             if errorCode == 1100 and self._on_connection_state:
                 self._on_connection_state("down")
             elif errorCode in (1101, 1102) and self._on_connection_state:
@@ -284,7 +314,9 @@ if _IBAPI_AVAILABLE:
                 self._on_connection_state("down")
 
         # ---- Account Summary ----
-        def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str):
+        def accountSummary(
+            self, reqId: int, account: str, tag: str, value: str, currency: str
+        ):
             self._resp.on_account_summary(reqId, tag, value, currency)
 
         def accountSummaryEnd(self, reqId: int):
@@ -294,13 +326,16 @@ if _IBAPI_AVAILABLE:
         def position(self, account: str, contract, position: float, avgCost: float):
             # position() has no reqId, so we key under a single active req
             # We'll support only one outstanding positions request at a time.
-            self._resp.on_position(0, {
-                "account": account,
-                "symbol": getattr(contract, "symbol", None),
-                "secType": getattr(contract, "secType", None),
-                "position": position,
-                "avgCost": avgCost,
-            })
+            self._resp.on_position(
+                0,
+                {
+                    "account": account,
+                    "symbol": getattr(contract, "symbol", None),
+                    "secType": getattr(contract, "secType", None),
+                    "position": position,
+                    "avgCost": avgCost,
+                },
+            )
 
         def positionEnd(self):
             self._resp.end_positions(0)
@@ -308,50 +343,67 @@ if _IBAPI_AVAILABLE:
         # ---- Open Orders ----
         def openOrder(self, orderId: int, contract, order: Order, orderState):
             # openOrder() has no reqId; key under a single active request
-            self._resp.on_open_order(0, {
-                "orderId": orderId,
-                "symbol": getattr(contract, "symbol", None),
-                "action": getattr(order, "action", None),
-                "totalQuantity": getattr(order, "totalQuantity", None),
-                "orderType": getattr(order, "orderType", None),
-                "lmtPrice": getattr(order, "lmtPrice", None),
-                "auxPrice": getattr(order, "auxPrice", None),
-                "status": getattr(orderState, "status", None),
-            })
+            self._resp.on_open_order(
+                0,
+                {
+                    "orderId": orderId,
+                    "symbol": getattr(contract, "symbol", None),
+                    "action": getattr(order, "action", None),
+                    "totalQuantity": getattr(order, "totalQuantity", None),
+                    "orderType": getattr(order, "orderType", None),
+                    "lmtPrice": getattr(order, "lmtPrice", None),
+                    "auxPrice": getattr(order, "auxPrice", None),
+                    "status": getattr(orderState, "status", None),
+                },
+            )
 
         def openOrderEnd(self):
             self._resp.end_open_orders(0)
 
-        def orderStatus(self, orderId: int, status: str, filled: float, remaining: float, avgFillPrice: float,
-                         permId: int, parentId: int, lastFillPrice: float, clientId: int, whyHeld: str, mktCapPrice: float):
+        def orderStatus(
+            self,
+            orderId: int,
+            status: str,
+            filled: float,
+            remaining: float,
+            avgFillPrice: float,
+            permId: int,
+            parentId: int,
+            lastFillPrice: float,
+            clientId: int,
+            whyHeld: str,
+            mktCapPrice: float,
+        ):
             # Push fills when filled quantity increases
             if lastFillPrice and filled:
-                self._fills_queue.put({
-                    "order_id": orderId,
-                    "price": lastFillPrice,
-                    "filled": filled,
-                    "remaining": remaining,
-                    "avg_price": avgFillPrice,
-                    "timestamp": datetime.utcnow(),
-                })
+                self._fills_queue.put(
+                    {
+                        "order_id": orderId,
+                        "price": lastFillPrice,
+                        "filled": filled,
+                        "remaining": remaining,
+                        "avg_price": avgFillPrice,
+                        "timestamp": datetime.utcnow(),
+                    }
+                )
 
         # ---- Executions / Commission (optional richer details) ----
         def execDetails(self, reqId: int, contract, execution):
-            self._fills_queue.put({
-                "req_id": reqId,
-                "symbol": getattr(contract, "symbol", None),
-                "price": getattr(execution, "price", None),
-                "qty": getattr(execution, "shares", None),
-                "time": getattr(execution, "time", None),
-                "order_id": getattr(execution, "orderId", None),
-            })
+            self._fills_queue.put(
+                {
+                    "req_id": reqId,
+                    "symbol": getattr(contract, "symbol", None),
+                    "price": getattr(execution, "price", None),
+                    "qty": getattr(execution, "shares", None),
+                    "time": getattr(execution, "time", None),
+                    "order_id": getattr(execution, "orderId", None),
+                }
+            )
 
         # ---- Market Data (L1) ----
         # tickPrice/tickSize fields per https://interactivebrokers.github.io/tws-api/tick_types.html
         def tickPrice(self, tickerId: TickerId, field: int, price: float, attrib):
-            mapping = {
-                1: "bid", 2: "ask", 4: "last", 6: "high", 7: "low", 9: "close"
-            }
+            mapping = {1: "bid", 2: "ask", 4: "last", 6: "high", 7: "low", 9: "close"}
             name = mapping.get(field)
             if name:
                 out = self._resp.on_tick(int(tickerId), name, float(price))
@@ -396,7 +448,11 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
         # In-memory state (always present; used in offline mode and as caches online)
         self._fills_queue: "queue.Queue[Any]" = queue.Queue()
         self._open_orders_cache: List[Dict[str, Any]] = []
-        self._account_snapshot: Dict[str, Any] = {"cash": 0.0, "equity": 0.0, "buying_power": 0.0}
+        self._account_snapshot: Dict[str, Any] = {
+            "cash": 0.0,
+            "equity": 0.0,
+            "buying_power": 0.0,
+        }
         self._positions_snapshot: Dict[str, Any] = {}
         self._on_fill_cb: Optional[Callable[[List[Any]], None]] = None
 
@@ -451,30 +507,36 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
 
             assert order_id is not None
             self._app.placeOrder(order_id, contract, order)
-            self._logger.info(f"Submitted order {order_id} {action} {abs_qty} {symbol} type={order_type} {fields}")
+            self._logger.info(
+                f"Submitted order {order_id} {action} {abs_qty} {symbol} type={order_type} {fields}"
+            )
             # Cache a minimal open order representation
-            self._open_orders_cache.append({
-                "id": str(order_id),
+            self._open_orders_cache.append(
+                {
+                    "id": str(order_id),
+                    "symbol": symbol,
+                    "quantity": qty,
+                    "action": action,
+                    "type": order_type,
+                    **fields,
+                    "status": "open",
+                }
+            )
+            return str(order_id)
+
+        # Offline fallback
+        order_id = f"IB-{int(datetime.utcnow().timestamp() * 1e6)}"
+        self._open_orders_cache.append(
+            {
+                "id": order_id,
                 "symbol": symbol,
                 "quantity": qty,
                 "action": action,
                 "type": order_type,
                 **fields,
                 "status": "open",
-            })
-            return str(order_id)
-
-        # Offline fallback
-        order_id = f"IB-{int(datetime.utcnow().timestamp() * 1e6)}"
-        self._open_orders_cache.append({
-            "id": order_id,
-            "symbol": symbol,
-            "quantity": qty,
-            "action": action,
-            "type": order_type,
-            **fields,
-            "status": "open",
-        })
+            }
+        )
         return order_id
 
     def cancel_order(self, order_id: str) -> bool:
@@ -485,7 +547,10 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
                 # allow non-int ids from offline mode
                 pass
         for o in self._open_orders_cache:
-            if str(o.get("id")) == str(order_id) and o.get("status") in ("open", "partially_filled"):
+            if str(o.get("id")) == str(order_id) and o.get("status") in (
+                "open",
+                "partially_filled",
+            ):
                 o["status"] = "cancelled"
                 return True
         return False
@@ -498,7 +563,11 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
             orders = self._resp_book.await_open_orders(0, timeout=5.0)
             # Reconcile cache lightly
             return orders
-        return [o for o in self._open_orders_cache if o.get("status") in ("open", "partially_filled")]
+        return [
+            o
+            for o in self._open_orders_cache
+            if o.get("status") in ("open", "partially_filled")
+        ]
 
     def poll_fills(self, until: Optional[datetime] = None) -> List[Any]:
         """Drain fills captured since last poll (dicts include at least price/qty/order_id).
@@ -542,7 +611,9 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
                 "equity": summary.get("NetLiquidation", 0.0),
                 "available_funds": summary.get("AvailableFunds", 0.0),
                 "buying_power": summary.get("BuyingPower", 0.0),
-                "currency": summary.get("Currency", summary.get("TotalCashValue.currency", "USD")),
+                "currency": summary.get(
+                    "Currency", summary.get("TotalCashValue.currency", "USD")
+                ),
             }
             self._account_snapshot.update(out)
             return dict(self._account_snapshot)
@@ -574,6 +645,7 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
             self._positions_snapshot = pos
             return dict(self._positions_snapshot)
         return dict(self._positions_snapshot)
+
     def _handle_connection_state(self, state: str) -> None:
         if state == "down":
             self._logger.warning("IB connection reported DOWN; marking disconnected")
@@ -594,7 +666,9 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
         backoff = self._config.reconnect_min_delay
         while not self._reconnect_stop.is_set():
             if not self._connected:
-                self._logger.info(f"Reconnect watchdog attempting to connect in {backoff:.1f}s ...")
+                self._logger.info(
+                    f"Reconnect watchdog attempting to connect in {backoff:.1f}s ..."
+                )
                 self._reconnect_stop.wait(backoff)
                 if self._reconnect_stop.is_set():
                     break
@@ -603,27 +677,43 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
                     backoff = self._config.reconnect_min_delay
                 except Exception as e:
                     self._logger.error(f"Reconnect attempt failed: {e}")
-                    backoff = min(self._config.reconnect_max_delay, max(self._config.reconnect_min_delay, backoff * 1.5))
+                    backoff = min(
+                        self._config.reconnect_max_delay,
+                        max(self._config.reconnect_min_delay, backoff * 1.5),
+                    )
             else:
                 # Sleep lightly; check state again
                 self._reconnect_stop.wait(2.0)
 
     # ---- Utilities for tests/mocks to seed state ----
 
-    def _seed_account(self, cash: float, positions: Optional[Dict[str, Any]] = None) -> None:
-        self._account_snapshot = {"cash": float(cash), "equity": float(cash), "buying_power": float(cash)}
+    def _seed_account(
+        self, cash: float, positions: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._account_snapshot = {
+            "cash": float(cash),
+            "equity": float(cash),
+            "buying_power": float(cash),
+        }
         self._positions_snapshot = positions or {}
 
-    def _push_fill(self, symbol: str, quantity: float, price: float, commission: float = 0.0) -> None:
-        self._fills_queue.put({
-            "symbol": symbol,
-            "quantity": quantity,
-            "price": price,
-            "commission": commission,
-        })
+    def _push_fill(
+        self, symbol: str, quantity: float, price: float, commission: float = 0.0
+    ) -> None:
+        self._fills_queue.put(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "price": price,
+                "commission": commission,
+            }
+        )
         # Update open orders cache status to 'filled' for the symbol if present
         for o in self._open_orders_cache:
-            if o.get("symbol") == symbol and o.get("status") in ("open", "partially_filled"):
+            if o.get("symbol") == symbol and o.get("status") in (
+                "open",
+                "partially_filled",
+            ):
                 o["status"] = "filled"
                 break
 
@@ -631,7 +721,9 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
 
     def connect(self) -> None:
         if not _IBAPI_AVAILABLE:
-            raise ImportError("ibapi is not installed. Install with extras: pip install 'vegas[ibkr]'")
+            raise ImportError(
+                "ibapi is not installed. Install with extras: pip install 'vegas[ibkr]'"
+            )
 
         if self._connected and isinstance(self._app, _IBApiApp):
             return
@@ -645,28 +737,40 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
             on_quote=self._handle_quote_update,
         )
         # Establish TCP/SSL connection
-        self._logger.info(f"Connecting to IBKR at {self._config.host}:{self._config.port} as client {self._config.client_id}")
+        self._logger.info(
+            f"Connecting to IBKR at {self._config.host}:{self._config.port} as client {self._config.client_id}"
+        )
         try:
-            ok = self._app.connect(self._config.host, self._config.port, clientId=self._config.client_id)
+            ok = self._app.connect(
+                self._config.host, self._config.port, clientId=self._config.client_id
+            )
         except Exception as e:
             self._logger.error(f"Failed to initiate connection to IBKR: {e}")
             raise
 
         # Spin the network thread
-        self._thread = threading.Thread(target=self._app.run, name="IBApiThread", daemon=True)
+        self._thread = threading.Thread(
+            target=self._app.run, name="IBApiThread", daemon=True
+        )
         self._thread.start()
 
         # Wait for nextValidId
         oid = self._resp_book.wait_for_next_order_id(timeout=5.0)
         if oid is None:
-            self._logger.warning("Did not receive nextValidId within timeout. Continuing anyway.")
+            self._logger.warning(
+                "Did not receive nextValidId within timeout. Continuing anyway."
+            )
         else:
             self._logger.info(f"Connected. Next order id: {oid}")
         self._connected = True
         # Start auto-reconnect watchdog if enabled
-        if self._config.auto_reconnect and (self._reconnect_thread is None or not self._reconnect_thread.is_alive()):
+        if self._config.auto_reconnect and (
+            self._reconnect_thread is None or not self._reconnect_thread.is_alive()
+        ):
             self._reconnect_stop.clear()
-            self._reconnect_thread = threading.Thread(target=self._reconnect_watchdog, name="IBReconnect", daemon=True)
+            self._reconnect_thread = threading.Thread(
+                target=self._reconnect_watchdog, name="IBReconnect", daemon=True
+            )
             self._reconnect_thread.start()
 
     def disconnect(self) -> None:
@@ -694,7 +798,9 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
     # ---- Market Data Subscriptions (L1) ----
 
     def subscribe_market_data(self, symbol: str) -> Optional[int]:
-        if not (_IBAPI_AVAILABLE and self._connected and isinstance(self._app, _IBApiApp)):
+        if not (
+            _IBAPI_AVAILABLE and self._connected and isinstance(self._app, _IBApiApp)
+        ):
             # Offline mode: simulate allocation of a ticker id and store mapping
             tid = self._next_ticker_id
             self._next_ticker_id += 1
@@ -750,7 +856,9 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
         """
         # Explicit type string, normalize
         explicit_type = getattr(signal, "order_type", None)
-        limit_price = getattr(signal, "limit_price", None) or getattr(signal, "price", None)
+        limit_price = getattr(signal, "limit_price", None) or getattr(
+            signal, "price", None
+        )
         stop_price = getattr(signal, "stop_price", None)
 
         if explicit_type:
@@ -758,14 +866,21 @@ class InteractiveBrokersBrokerAdapter(BrokerAdapter):
         else:
             et = None
 
-        if et in {"market", "mkt"} or (et is None and limit_price is None and stop_price is None):
+        if et in {"market", "mkt"} or (
+            et is None and limit_price is None and stop_price is None
+        ):
             return "MKT", {}
         if et in {"limit", "lmt"} or (limit_price is not None and stop_price is None):
             return "LMT", {"lmtPrice": float(limit_price)}
         if et in {"stop", "stp"} or (stop_price is not None and limit_price is None):
             return "STP", {"auxPrice": float(stop_price)}
-        if et in {"stop_limit", "stp lmt", "stp_lmt", "stop limit"} or (stop_price is not None and limit_price is not None):
-            return "STP LMT", {"auxPrice": float(stop_price), "lmtPrice": float(limit_price)}
+        if et in {"stop_limit", "stp lmt", "stp_lmt", "stop limit"} or (
+            stop_price is not None and limit_price is not None
+        ):
+            return "STP LMT", {
+                "auxPrice": float(stop_price),
+                "lmtPrice": float(limit_price),
+            }
 
         # Fallback to market
         return "MKT", {}

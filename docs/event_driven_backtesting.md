@@ -63,7 +63,7 @@ class MyEventDrivenStrategy(Strategy):
         context.short_window = 10
         context.long_window = 30
         context.signals = {}  # Store signals for each symbol
-    
+
     def before_trading_start(self, context, data):
         """Calculate signals before market opens."""
         # Calculate moving averages for each symbol
@@ -74,32 +74,32 @@ class MyEventDrivenStrategy(Strategy):
                 closes = symbol_data.sort_values('timestamp')['close']
                 short_ma = closes[-context.short_window:].mean()
                 long_ma = closes[-context.long_window:].mean()
-                
+
                 # Check for crossover
                 if short_ma > long_ma:
                     context.signals[symbol] = 'buy'
                 elif short_ma < long_ma:
                     context.signals[symbol] = 'sell'
-    
+
     def on_market_open(self, context, data, portfolio):
         """Execute signals at market open."""
         print(f"Market open: {data['timestamp'].iloc[0] if not data.empty else None}")
         # Actual orders will be generated in handle_data
-    
+
     def handle_data(self, context, data):
         """Generate signals for the current event."""
         signals = []
-        
+
         # Process each symbol with a signal
         for symbol, action in context.signals.items():
             symbol_data = data[data['symbol'] == symbol]
-            
+
             # Skip if no data available
             if symbol_data.empty:
                 continue
-                
+
             price = symbol_data['close'].iloc[0]
-            
+
             if action == 'buy':
                 # Generate buy signal
                 signals.append(Signal(
@@ -118,10 +118,10 @@ class MyEventDrivenStrategy(Strategy):
                         quantity=quantity,  # Sell all shares
                         price=price
                     ))
-        
+
         # Clear signals after processing
         context.signals = {}
-        
+
         return signals
 ```
 
@@ -166,4 +166,4 @@ For optimal performance in event-driven backtesting, Vegas uses:
 
 ## Example
 
-See `examples/event_driven_example.py` for a complete example of an event-driven strategy. 
+See `examples/event_driven_example.py` for a complete example of an event-driven strategy.

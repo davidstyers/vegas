@@ -107,15 +107,15 @@ You can run any SQL query supported by DuckDB:
 
 ```bash
 vegas db-query --query "
-SELECT 
-    symbol, 
-    DATE_TRUNC('month', timestamp) as month, 
+SELECT
+    symbol,
+    DATE_TRUNC('month', timestamp) as month,
     AVG(close) as avg_price,
     MAX(high) as max_high,
     MIN(low) as min_low,
     SUM(volume) as total_volume
-FROM market_data 
-WHERE symbol IN ('AAPL', 'MSFT', 'GOOG') 
+FROM market_data
+WHERE symbol IN ('AAPL', 'MSFT', 'GOOG')
 GROUP BY symbol, month
 ORDER BY month, symbol
 "
@@ -143,4 +143,4 @@ For best performance:
 
 See the `examples/database_example.sh` script for a full demonstration of the database system features.
 
-For advanced data analysis using DuckDB, check out `examples/duckdb_analysis_example.py`. 
+For advanced data analysis using DuckDB, check out `examples/duckdb_analysis_example.py`.

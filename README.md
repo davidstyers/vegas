@@ -1,3 +1,4 @@
+[![codecov](https://codecov.io/gh/davidstyers/vegas/branch/main/graph/badge.svg)](https://codecov.io/gh/davidstyers/vegas)
 # Vegas: Event-Driven Backtesting Engine
 
 A focused Python backtesting framework for event-driven trading strategies. Vegas provides a clean and efficient implementation for simulating market events and strategy interactions.
@@ -36,7 +37,7 @@ class MovingAverageCrossover(Strategy):
         context.short_window = 20
         context.long_window = 50
         context.symbols = ['AAPL', 'MSFT', 'GOOG']
-        
+
     def before_trading_start(self, context, data):
         # Calculate signals before market opens
         for symbol in context.symbols:
@@ -45,14 +46,14 @@ class MovingAverageCrossover(Strategy):
                 prices = symbol_data.sort('timestamp').get_column('close')
                 short_ma = prices.tail(context.short_window).mean()
                 long_ma = prices.tail(context.long_window).mean()
-                
+
                 if short_ma > long_ma:
                     # Bullish signal
                     context.signal = 'buy'
                 elif short_ma < long_ma:
                     # Bearish signal
                     context.signal = 'sell'
-                    
+
     def handle_data(self, context, data):
         signals = []
         for symbol in context.symbols:
@@ -64,7 +65,7 @@ class MovingAverageCrossover(Strategy):
                     quantity=10,
                     price=None  # Use market price
                 ))
-                
+
         return signals
 
 # Create engine
@@ -126,7 +127,7 @@ Vegas provides timezone handling to normalize timestamps across different market
 
 ```python
 # Create engine with specific timezone
-engine = BacktestEngine(timezone="US/Eastern")  
+engine = BacktestEngine(timezone="US/Eastern")
 
 # Load data - timestamps will be automatically converted
 engine.load_data("data/example.csv")
@@ -179,4 +180,4 @@ See [Market Hours Documentation](docs/market_hours.md) for more details.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.

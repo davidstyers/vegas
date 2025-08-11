@@ -2,4 +2,4 @@
 
 from vegas.engine.engine import BacktestEngine
 
-__all__ = ["BacktestEngine"] 
+__all__ = ["BacktestEngine"]

@@ -2,17 +2,22 @@
 
 This module provides a portfolio tracking system for event-driven backtesting.
 """
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+
 import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import polars as pl
 
-SHORT_INITIAL_MARGIN_RATE = 0.50  # Reg T approximation: 50% initial margin on short market value
+SHORT_INITIAL_MARGIN_RATE = (
+    0.50  # Reg T approximation: 50% initial margin on short market value
+)
 EPS = 1e-6
 
 
 class Position:
     """Representation of a single portfolio position (long or short)."""
+
     def __init__(self, symbol: str, quantity: float, value: float = 0.0):
         self.symbol = symbol
         self.quantity = quantity  # negative quantity represents a short
@@ -33,10 +38,13 @@ class Portfolio:
     portfolio consults the injected `DataPortal` for pricing when updating
     from transactions.
     """
+
     def __init__(self, initial_capital: float = 100000.0, data_portal=None):
         self.initial_capital = initial_capital
         self.current_cash = initial_capital
-        self.positions: Dict[str, float] = {}        # symbol -> quantity (can be negative for shorts)
+        self.positions: Dict[
+            str, float
+        ] = {}  # symbol -> quantity (can be negative for shorts)
         # Enriched per-position dict keyed by symbol. Each value:
         # {'symbol','buy_price','qty','current_price','current_market_value','pnl','pnl_pct'}
         self.position_values: Dict[str, Dict[str, float]] = {}
@@ -49,22 +57,28 @@ class Portfolio:
         self._seeded_from_snapshot = False
 
         # Margin and buying power tracking
-        self.short_margin_requirement: float = 0.0  # Total margin requirement for shorts
-        self.buying_power: float = initial_capital  # Available to initiate long or short considering margin
+        self.short_margin_requirement: float = (
+            0.0  # Total margin requirement for shorts
+        )
+        self.buying_power: float = (
+            initial_capital  # Available to initiate long or short considering margin
+        )
 
         # History
-        self.equity_history = []      # dicts: timestamp, equity, cash, buying_power
-        self.position_history = []    # dicts: timestamp, symbol, quantity, value
-        self.transaction_history = [] # dicts: timestamp, symbol, quantity, price, commission
+        self.equity_history = []  # dicts: timestamp, equity, cash, buying_power
+        self.position_history = []  # dicts: timestamp, symbol, quantity, value
+        self.transaction_history = []  # dicts: timestamp, symbol, quantity, price, commission
 
         # In-memory cache of last known prices per symbol (updated only from price_lookup values)
         self._last_price: Dict[str, float] = {}
 
-        self._logger = logging.getLogger('vegas.portfolio')
+        self._logger = logging.getLogger("vegas.portfolio")
         # Optional DataPortal for price lookups
         self._data_portal = data_portal
 
-    def set_account_snapshot(self, cash: float, positions_dict: Dict[str, Dict[str, float]]) -> None:
+    def set_account_snapshot(
+        self, cash: float, positions_dict: Dict[str, Dict[str, float]]
+    ) -> None:
         """Seed portfolio from an external brokerage snapshot.
 
         Positions dict example:
@@ -116,9 +130,9 @@ class Portfolio:
         """
         total_short_market_value = 0.0
         total_long_market_value = 0.0
-        for symbol, pv in self.position_values.items():
+        for _symbol, pv in self.position_values.items():
             # pv is enriched dict; use current_market_value
-            value = pv.get('current_market_value', 0.0)
+            value = pv.get("current_market_value", 0.0)
             if value < 0:
                 total_short_market_value += abs(value)
             else:
@@ -126,9 +140,13 @@ class Portfolio:
 
         requirement = 1.5 * total_short_market_value
         self.short_margin_requirement = requirement
-        self.buying_power = self.current_cash + total_long_market_value - self.short_margin_requirement
+        self.buying_power = (
+            self.current_cash + total_long_market_value - self.short_margin_requirement
+        )
 
-    def _adjust_for_buying_power(self, symbol: str, quantity: float, price: float, commission: float) -> float:
+    def _adjust_for_buying_power(
+        self, symbol: str, quantity: float, price: float, commission: float
+    ) -> float:
         """Adjust order size to respect cash/margin constraints.
 
         Longs: require cash >= qty*price + commission.
@@ -161,8 +179,12 @@ class Portfolio:
             return quantity
 
         # We are initiating/increasing short. Compute delta requirement.
-        old_short_mv = abs(min(0.0, current_qty) * price)   # current short notional for this symbol
-        new_short_mv = abs(min(0.0, proposed_qty) * price)  # proposed short notional for this symbol
+        old_short_mv = abs(
+            min(0.0, current_qty) * price
+        )  # current short notional for this symbol
+        new_short_mv = abs(
+            min(0.0, proposed_qty) * price
+        )  # proposed short notional for this symbol
         delta_req = 1.5 * max(0.0, new_short_mv - old_short_mv)
 
         # Ensure buying power covers increased requirement
@@ -194,43 +216,45 @@ class Portfolio:
         )
         return adjusted_qty
 
-    def update_from_transactions(self, timestamp, transactions, market_data: Optional[pl.DataFrame] = None):
+    def update_from_transactions(
+        self, timestamp, transactions, market_data: Optional[pl.DataFrame] = None
+    ):
         """Update state from executed transactions and revalue the portfolio.
 
         Notes:
         - `market_data` is ignored; prices come from the injected `DataPortal`.
         - `transactions` must have: symbol, quantity, price, commission.
         - Supports short-selling with Reg T 150% initial margin approximation.
+
         """
 
         def _format_trade_message(trade):
-            side = "BOT" if trade['quantity'] > 0 else "SLD"
-            abs_qty = abs(trade['quantity'])
+            side = "BOT" if trade["quantity"] > 0 else "SLD"
+            abs_qty = abs(trade["quantity"])
             msg = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} {side} {abs_qty} {trade['symbol']} @ ${trade['price']:.2f} Commission ${trade['commission']:.2f} "
             return msg
 
         # Process transactions
         if not transactions.is_empty():
             for txn in transactions.to_dicts():
-                symbol = txn['symbol']
-                quantity = float(txn['quantity'])
-                price = float(txn['price'])
-                commission = float(txn.get('commission', 0.0))
+                symbol = txn["symbol"]
+                quantity = float(txn["quantity"])
+                price = float(txn["price"])
+                commission = float(txn.get("commission", 0.0))
 
-                try:
-                    ts_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    ts_str = str(timestamp)
+                # Timestamp formatting handled in the log message formatter
 
                 # Validate and adjust for cash/buying power
-                adjusted_qty = self._adjust_for_buying_power(symbol, quantity, price, commission)
+                adjusted_qty = self._adjust_for_buying_power(
+                    symbol, quantity, price, commission
+                )
                 if abs(adjusted_qty) < EPS:
                     continue
                 quantity = adjusted_qty
 
                 # Update cash: buy reduces cash; sell increases cash
                 # Note: commission always reduces cash
-                self.current_cash -= (quantity * price + commission)
+                self.current_cash -= quantity * price + commission
 
                 # Update positions and average price
                 current_qty = self.positions.get(symbol, 0.0)
@@ -249,13 +273,17 @@ class Portfolio:
                         self.positions[symbol] = new_qty
                         self.avg_price[symbol] = abs(price)
                     else:
-                        same_side = (current_qty > 0 and new_qty > 0) or (current_qty < 0 and new_qty < 0)
+                        same_side = (current_qty > 0 and new_qty > 0) or (
+                            current_qty < 0 and new_qty < 0
+                        )
                         increasing_magnitude = abs(new_qty) > abs(current_qty)
                         if same_side and increasing_magnitude:
                             # Adding to existing position -> moving average
                             old_avg = self.avg_price.get(symbol, abs(price))
                             # Use share counts by magnitude (works for long/short)
-                            new_avg = (old_avg * abs(current_qty) + abs(price) * abs(quantity)) / abs(new_qty)
+                            new_avg = (
+                                old_avg * abs(current_qty) + abs(price) * abs(quantity)
+                            ) / abs(new_qty)
                             self.positions[symbol] = new_qty
                             self.avg_price[symbol] = new_avg
                         elif same_side and not increasing_magnitude:
@@ -267,13 +295,13 @@ class Portfolio:
                             # Example: long 10, sell 15 -> new short 5 at price
                             self.positions[symbol] = new_qty
                             self.avg_price[symbol] = abs(price)
-                
+
                 trade = {
-                    'timestamp': timestamp,
-                    'symbol': symbol,
-                    'quantity': quantity,
-                    'price': price,
-                    'commission': commission
+                    "timestamp": timestamp,
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "price": price,
+                    "commission": commission,
                 }
                 # Record transaction
                 self.transaction_history.append(trade)
@@ -283,13 +311,13 @@ class Portfolio:
         # Update position values using DataPortal-derived prices only
         self.position_values = {}
         total_position_value = 0.0
-        
+
         # Build a lookup of current prices for all open position symbols via DataPortal
         price_lookup: Dict[str, float] = {}
         if self._data_portal is not None:
             for symbol in list(self.positions.keys()):
                 try:
-                    px = self._data_portal.get_spot_value(symbol, 'close', timestamp)
+                    px = self._data_portal.get_spot_value(symbol, "close", timestamp)
                 except Exception:
                     px = None
                 if px is not None:
@@ -312,23 +340,25 @@ class Portfolio:
             pnl_pct = (pnl / denom) * 100 if denom > EPS else 0.0
 
             self.position_values[symbol] = {
-                'symbol': symbol,
-                'buy_price': buy_price,
-                'qty': qty,
-                'current_price': current_price,
-                'current_market_value': current_market_value,
-                'pnl': pnl,
-                'pnl_pct': pnl_pct
+                "symbol": symbol,
+                "buy_price": buy_price,
+                "qty": qty,
+                "current_price": current_price,
+                "current_market_value": current_market_value,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
             }
             total_position_value += current_market_value
 
             # Record position snapshot
-            self.position_history.append({
-                'timestamp': timestamp,
-                'symbol': symbol,
-                'quantity': qty,
-                'value': current_market_value
-            })
+            self.position_history.append(
+                {
+                    "timestamp": timestamp,
+                    "symbol": symbol,
+                    "quantity": qty,
+                    "value": current_market_value,
+                }
+            )
 
         # Recompute margin and buying power
         self._recompute_short_margin_and_buying_power()
@@ -337,13 +367,15 @@ class Portfolio:
         self.current_equity = self.current_cash + total_position_value
 
         # Record equity history
-        self.equity_history.append({
-            'timestamp': timestamp,
-            'equity': self.current_equity,
-            'cash': self.current_cash,
-            'buying_power': self.buying_power,
-            'short_margin_requirement': self.short_margin_requirement
-        })
+        self.equity_history.append(
+            {
+                "timestamp": timestamp,
+                "equity": self.current_equity,
+                "cash": self.current_cash,
+                "buying_power": self.buying_power,
+                "short_margin_requirement": self.short_margin_requirement,
+            }
+        )
 
     def get_portfolio_value(self):
         """Get the current portfolio value (equity)."""
@@ -352,43 +384,47 @@ class Portfolio:
     def get_equity_curve(self):
         """Get the portfolio equity curve DataFrame."""
         if not self.equity_history:
-            return pl.DataFrame(schema={
-                'timestamp': pl.Datetime('ns'),
-                'equity': pl.Float64,
-                'cash': pl.Float64,
-                'buying_power': pl.Float64,
-                'short_margin_requirement': pl.Float64
-            })
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime("ns"),
+                    "equity": pl.Float64,
+                    "cash": pl.Float64,
+                    "buying_power": pl.Float64,
+                    "short_margin_requirement": pl.Float64,
+                }
+            )
         return pl.DataFrame(self.equity_history)
 
     def get_returns(self):
         """Get portfolio returns."""
         equity_curve = self.get_equity_curve()
         if len(equity_curve) <= 1:
-            return pl.DataFrame(schema={
-                'timestamp': pl.Datetime('ns'),
-                'return': pl.Float64,
-                'cumulative_return': pl.Float64,
-            })
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime("ns"),
+                    "return": pl.Float64,
+                    "cumulative_return": pl.Float64,
+                }
+            )
 
         equity_curve = equity_curve.with_columns(
-            (pl.col('equity').pct_change().fill_null(0)).alias('return')
-        ).with_columns(
-            (1 + pl.col('return')).cum_prod().alias('cumulative_return')
-        )
+            (pl.col("equity").pct_change().fill_null(0)).alias("return")
+        ).with_columns((1 + pl.col("return")).cum_prod().alias("cumulative_return"))
 
-        return equity_curve[['timestamp', 'return', 'cumulative_return']]
+        return equity_curve[["timestamp", "return", "cumulative_return"]]
 
     def get_transactions(self):
         """Get all transactions as DataFrame."""
         if not self.transaction_history:
-            return pl.DataFrame(schema={
-                'timestamp': pl.Datetime('ns'),
-                'symbol': pl.String,
-                'quantity': pl.Float64,
-                'price': pl.Float64,
-                'commission': pl.Float64
-            })
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime("ns"),
+                    "symbol": pl.String,
+                    "quantity": pl.Float64,
+                    "price": pl.Float64,
+                    "commission": pl.Float64,
+                }
+            )
         return pl.DataFrame(self.transaction_history)
 
     def get_positions(self):
@@ -397,7 +433,7 @@ class Portfolio:
         for symbol, qty in self.positions.items():
             if abs(qty) > EPS:
                 pv = self.position_values.get(symbol, {})
-                value = pv.get('current_market_value', 0.0)
+                value = pv.get("current_market_value", 0.0)
                 out.append(Position(symbol, qty, value))
         return out
 
@@ -406,20 +442,28 @@ class Portfolio:
         rows = []
         for symbol, qty in self.positions.items():
             pv = self.position_values.get(symbol, {})
-            value = pv.get('current_market_value', 0.0)
-            rows.append({
-                'symbol': symbol,
-                'quantity': qty,
-                'value': value,
-                'weight': (value / self.current_equity) if self.current_equity != 0 else 0.0
-            })
+            value = pv.get("current_market_value", 0.0)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "quantity": qty,
+                    "value": value,
+                    "weight": (
+                        (value / self.current_equity)
+                        if self.current_equity != 0
+                        else 0.0
+                    ),
+                }
+            )
         if not rows:
-            return pl.DataFrame(schema={
-                'symbol': pl.String,
-                'quantity': pl.Float64,
-                'value': pl.Float64,
-                'weight': pl.Float64
-            })
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.String,
+                    "quantity": pl.Float64,
+                    "value": pl.Float64,
+                    "weight": pl.Float64,
+                }
+            )
         return pl.DataFrame(rows)
 
     def get_positions_history(self):
@@ -427,9 +471,9 @@ class Portfolio:
         history = {}
         df = pl.DataFrame(self.position_history)
         if not df.is_empty():
-            for ts, group in df.group_by('timestamp'):
+            for ts, group in df.group_by("timestamp"):
                 history[ts] = {
-                    row['symbol']: {'quantity': row['quantity'], 'value': row['value']}
+                    row["symbol"]: {"quantity": row["quantity"], "value": row["value"]}
                     for row in group.iter_rows(named=True)
                 }
         return history
@@ -437,48 +481,55 @@ class Portfolio:
     def get_stats(self):
         """Calculate basic performance statistics."""
         stats: Dict[str, Any] = {}
-        stats['initial_capital'] = self.initial_capital
-        stats['final_value'] = self.current_equity
-        stats['cash'] = self.current_cash
-        stats['buying_power'] = self.buying_power
-        stats['short_margin_requirement'] = self.short_margin_requirement
-        stats['total_return'] = self.current_equity - self.initial_capital
-        stats['total_return_pct'] = (self.current_equity / self.initial_capital - 1) * 100
+        stats["initial_capital"] = self.initial_capital
+        stats["final_value"] = self.current_equity
+        stats["cash"] = self.current_cash
+        stats["buying_power"] = self.buying_power
+        stats["short_margin_requirement"] = self.short_margin_requirement
+        stats["total_return"] = self.current_equity - self.initial_capital
+        stats["total_return_pct"] = (
+            self.current_equity / self.initial_capital - 1
+        ) * 100
 
         transactions_df = self.get_transactions()
-        stats['num_trades'] = len(transactions_df)
+        stats["num_trades"] = len(transactions_df)
 
         equity_df = self.get_equity_curve()
         returns_df = self.get_returns()
 
         if len(equity_df) > 1:
             equity_df = equity_df.with_columns(
-                pl.col('equity').cum_max().alias('previous_peak')
+                pl.col("equity").cum_max().alias("previous_peak")
             ).with_columns(
-                ((pl.col('equity') - pl.col('previous_peak')) / pl.col('previous_peak') * 100).alias('drawdown')
+                (
+                    (pl.col("equity") - pl.col("previous_peak"))
+                    / pl.col("previous_peak")
+                    * 100
+                ).alias("drawdown")
             )
-            max_drawdown = equity_df.select(pl.col('drawdown').min()).item()
-            stats['max_drawdown_pct'] = abs(max_drawdown)
+            max_drawdown = equity_df.select(pl.col("drawdown").min()).item()
+            stats["max_drawdown_pct"] = abs(max_drawdown)
 
             if returns_df.height > 1:
-                daily_returns = returns_df['return']
+                daily_returns = returns_df["return"]
                 mean_return = daily_returns.mean()
                 std_return = daily_returns.std()
                 if std_return and std_return > 0:
-                    stats['sharpe_ratio'] = (mean_return / std_return) * (252 ** 0.5)
-                    stats['annual_return_pct'] = ((1 + mean_return) ** 252 - 1) * 100
+                    stats["sharpe_ratio"] = (mean_return / std_return) * (252**0.5)
+                    stats["annual_return_pct"] = ((1 + mean_return) ** 252 - 1) * 100
                 else:
-                    stats['sharpe_ratio'] = 0.0
-                    stats['annual_return_pct'] = 0.0
+                    stats["sharpe_ratio"] = 0.0
+                    stats["annual_return_pct"] = 0.0
             else:
-                stats['sharpe_ratio'] = 0.0
-                stats['annual_return_pct'] = 0.0
+                stats["sharpe_ratio"] = 0.0
+                stats["annual_return_pct"] = 0.0
 
         return stats
 
-    def build_positions_ledger(self, latest_price_lookup: Optional[Dict[str, float]] = None) -> pl.DataFrame:
-        """
-        Build and return a complete positions ledger (open and closed) as a Polars DataFrame.
+    def build_positions_ledger(
+        self, latest_price_lookup: Optional[Dict[str, float]] = None
+    ) -> pl.DataFrame:
+        """Build and return a complete positions ledger (open and closed) as a Polars DataFrame.
 
         The ledger reconstructs position lifecycles from the recorded transaction_history and
         position/equity snapshots, producing one row per realized or still-open position.
@@ -507,24 +558,27 @@ class Portfolio:
 
         Returns:
           Polars DataFrame with the ledger rows (possibly empty).
+
         """
         # Fast return if no transactions ever recorded
         if not self.transaction_history:
-            return pl.DataFrame(schema={
-                "symbol": pl.Utf8,
-                "pos_open_ts": pl.Datetime("ns"),
-                "pos_close_ts": pl.Datetime("ns"),
-                "side": pl.Utf8,
-                "qty_open": pl.Float64,
-                "qty_close": pl.Float64,
-                "buy_price": pl.Float64,
-                "exit_price": pl.Float64,
-                "realized_pnl": pl.Float64,
-                "unrealized_pnl": pl.Float64,
-                "pnl_dollars": pl.Float64,
-                "pnl_pct": pl.Float64,
-                "commissions": pl.Float64,
-            })
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.Utf8,
+                    "pos_open_ts": pl.Datetime("ns"),
+                    "pos_close_ts": pl.Datetime("ns"),
+                    "side": pl.Utf8,
+                    "qty_open": pl.Float64,
+                    "qty_close": pl.Float64,
+                    "buy_price": pl.Float64,
+                    "exit_price": pl.Float64,
+                    "realized_pnl": pl.Float64,
+                    "unrealized_pnl": pl.Float64,
+                    "pnl_dollars": pl.Float64,
+                    "pnl_pct": pl.Float64,
+                    "commissions": pl.Float64,
+                }
+            )
 
         # Group transactions by symbol in timestamp order
         tx_df = pl.DataFrame(self.transaction_history)
@@ -534,15 +588,17 @@ class Portfolio:
         latest_price_lookup = latest_price_lookup or {}
 
         # Helper to finalize and append a ledger row
-        def _append_row(symbol: str,
-                        open_ts: datetime,
-                        close_ts: Optional[datetime],
-                        side: str,
-                        qty_open: float,
-                        qty_close: float,
-                        buy_price: float,
-                        exit_price: Optional[float],
-                        commissions: float) -> None:
+        def _append_row(
+            symbol: str,
+            open_ts: datetime,
+            close_ts: Optional[datetime],
+            side: str,
+            qty_open: float,
+            qty_close: float,
+            buy_price: float,
+            exit_price: Optional[float],
+            commissions: float,
+        ) -> None:
             notional = abs(qty_open) * abs(buy_price)
             if exit_price is None:
                 pnl = 0.0
@@ -561,21 +617,23 @@ class Portfolio:
             else:
                 realized = float(pnl)
 
-            rows.append({
-                "symbol": symbol,
-                "pos_open_ts": open_ts,
-                "pos_close_ts": close_ts,
-                "side": side,
-                "qty_open": float(qty_open),
-                "qty_close": float(qty_close),
-                "buy_price": float(buy_price),
-                "exit_price": None if exit_price is None else float(exit_price),
-                "realized_pnl": realized,
-                "unrealized_pnl": unrealized,
-                "pnl_dollars": float(pnl),
-                "pnl_pct": float(pnl_pct),
-                "commissions": float(commissions),
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "pos_open_ts": open_ts,
+                    "pos_close_ts": close_ts,
+                    "side": side,
+                    "qty_open": float(qty_open),
+                    "qty_close": float(qty_close),
+                    "buy_price": float(buy_price),
+                    "exit_price": None if exit_price is None else float(exit_price),
+                    "realized_pnl": realized,
+                    "unrealized_pnl": unrealized,
+                    "pnl_dollars": float(pnl),
+                    "pnl_pct": float(pnl_pct),
+                    "commissions": float(commissions),
+                }
+            )
 
         # Reconstruct per-symbol lifecycles by walking quantity over time
         for symbol, sym_tx in tx_df.group_by("symbol", maintain_order=True):
@@ -610,13 +668,17 @@ class Portfolio:
                 # Same side?
                 prev_side_long = prev_qty > 0
                 new_side_long = new_qty > 0
-                same_side = (prev_side_long and new_side_long) or ((not prev_side_long) and (not new_side_long))
+                same_side = (prev_side_long and new_side_long) or (
+                    (not prev_side_long) and (not new_side_long)
+                )
 
                 if same_side:
                     # increasing or reducing on same side
                     if abs(new_qty) > abs(prev_qty):
                         # adding -> moving average
-                        avg_px = (abs(avg_px) * abs(prev_qty) + abs(px) * abs(qty)) / abs(new_qty)
+                        avg_px = (
+                            abs(avg_px) * abs(prev_qty) + abs(px) * abs(qty)
+                        ) / abs(new_qty)
                         net_qty = new_qty
                     else:
                         # reducing but still same side -> keep avg_px
@@ -634,7 +696,7 @@ class Portfolio:
                         qty_close=close_qty,
                         buy_price=avg_px,
                         exit_price=abs(px),
-                        commissions=accrued_commission
+                        commissions=accrued_commission,
                     )
                     # Start a new position with the remainder
                     residual = new_qty  # signed
@@ -650,7 +712,9 @@ class Portfolio:
                         side = "LONG" if net_qty > 0 else "SHORT"
                         avg_px = abs(px)
                         pos_open_ts = ts
-                        accrued_commission = 0.0  # commissions after close attributed to next cycle
+                        accrued_commission = (
+                            0.0  # commissions after close attributed to next cycle
+                        )
 
             # End of symbol transactions: if still open, mark-to-market with last known price
             if abs(net_qty) > EPS and pos_open_ts is not None and side is not None:
@@ -663,20 +727,26 @@ class Portfolio:
                     last_ts: Optional[datetime] = None
                     try:
                         if self.equity_history:
-                            last_ts = self.equity_history[-1]['timestamp']
+                            last_ts = self.equity_history[-1]["timestamp"]
                         elif self.transaction_history:
-                            last_ts = self.transaction_history[-1]['timestamp']
+                            last_ts = self.transaction_history[-1]["timestamp"]
                     except Exception:
                         last_ts = None
                     if self._data_portal is not None and last_ts is not None:
                         try:
-                            spot = self._data_portal.get_spot_value(symbol, 'close', last_ts)
+                            spot = self._data_portal.get_spot_value(
+                                symbol, "close", last_ts
+                            )
                             if spot is not None:
                                 exit_px = float(spot)
                         except Exception:
                             exit_px = None
                     if exit_px is None:
-                        exit_px = float(self._last_price.get(symbol)) if symbol in self._last_price else None
+                        exit_px = (
+                            float(self._last_price.get(symbol))
+                            if symbol in self._last_price
+                            else None
+                        )
 
                 _append_row(
                     symbol=symbol,
@@ -687,25 +757,27 @@ class Portfolio:
                     qty_close=abs(net_qty),
                     buy_price=avg_px,
                     exit_price=exit_px,
-                    commissions=accrued_commission
+                    commissions=accrued_commission,
                 )
 
         if not rows:
-            return pl.DataFrame(schema={
-                "symbol": pl.Utf8,
-                "pos_open_ts": pl.Datetime("ns"),
-                "pos_close_ts": pl.Datetime("ns"),
-                "side": pl.Utf8,
-                "qty_open": pl.Float64,
-                "qty_close": pl.Float64,
-                "buy_price": pl.Float64,
-                "exit_price": pl.Float64,
-                "realized_pnl": pl.Float64,
-                "unrealized_pnl": pl.Float64,
-                "pnl_dollars": pl.Float64,
-                "pnl_pct": pl.Float64,
-                "commissions": pl.Float64,
-            })
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.Utf8,
+                    "pos_open_ts": pl.Datetime("ns"),
+                    "pos_close_ts": pl.Datetime("ns"),
+                    "side": pl.Utf8,
+                    "qty_open": pl.Float64,
+                    "qty_close": pl.Float64,
+                    "buy_price": pl.Float64,
+                    "exit_price": pl.Float64,
+                    "realized_pnl": pl.Float64,
+                    "unrealized_pnl": pl.Float64,
+                    "pnl_dollars": pl.Float64,
+                    "pnl_pct": pl.Float64,
+                    "commissions": pl.Float64,
+                }
+            )
 
         df = pl.DataFrame(rows)
 

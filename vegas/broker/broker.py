@@ -4,15 +4,19 @@ This module provides broker simulation for executing orders with slippage
 and commission models, tracking positions, and maintaining transaction history.
 """
 
-from typing import Dict, List, Optional, Any, Tuple
-from enum import Enum
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
-import polars as pl
-import uuid
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
-from vegas.broker.slippage import SlippageModel, FixedSlippageModel
-from vegas.broker.commission import CommissionModel, FixedCommissionModel, PerShareCommissionModel
+import polars as pl
+
+from vegas.broker.commission import (
+    CommissionModel,
+    PerShareCommissionModel,
+)
+from vegas.broker.slippage import FixedSlippageModel, SlippageModel
 from vegas.strategy import Signal
 
 
@@ -26,21 +30,23 @@ class OrderStatus(Enum):
       - CANCELLED: Order cancelled before complete fill
       - REJECTED: Order rejected by broker/exchange simulation
     """
-    OPEN = 'open'
-    FILLED = 'filled'
-    PARTIALLY_FILLED = 'partially_filled'
-    CANCELLED = 'cancelled'
-    REJECTED = 'rejected'
+
+    OPEN = "open"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
 
 class OrderType(Enum):
     """Order type enumeration for execution semantics."""
-    MARKET = 'market'
-    LIMIT = 'limit'
-    STOP = 'stop'
-    STOP_LIMIT = 'stop_limit'
-    TRAIL_STOP = 'trail_stop'
-    TRAIL_STOP_LIMIT = 'trail_stop_limit'
+
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
+    TRAIL_STOP = "trail_stop"
+    TRAIL_STOP_LIMIT = "trail_stop_limit"
 
 
 @dataclass
@@ -89,6 +95,7 @@ class Order:
     :Example:
         >>> Order(id='1', symbol='AAPL', quantity=10, order_type=OrderType.MARKET)
     """
+
     id: str
     symbol: str
     quantity: float
@@ -110,7 +117,7 @@ class Order:
     parent_id: Optional[str] = None
     oco_group_id: Optional[str] = None
     bracket_role: Optional[str] = None
-    
+
     def __post_init__(self):
         """Finalize initialization and validate trailing/stop parameters.
 
@@ -124,10 +131,19 @@ class Order:
         if self.order_type in (OrderType.TRAIL_STOP, OrderType.TRAIL_STOP_LIMIT):
             if (self.trail_amount is None) == (self.trail_percent is None):
                 # Must provide exactly one
-                raise ValueError("Provide exactly one of trail_amount or trail_percent for trailing orders.")
-        if self.order_type in (OrderType.STOP, OrderType.STOP_LIMIT) and self.stop_price is None:
+                raise ValueError(
+                    "Provide exactly one of trail_amount or trail_percent for trailing orders."
+                )
+        if (
+            self.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+            and self.stop_price is None
+        ):
             raise ValueError("stop_price is required for STOP/STOP_LIMIT orders.")
-        if self.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TRAIL_STOP_LIMIT) and self.limit_price is None:
+        if (
+            self.order_type
+            in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TRAIL_STOP_LIMIT)
+            and self.limit_price is None
+        ):
             # Allow None for pre-trigger trailing stop limit; but STOP_LIMIT requires a limit on trigger
             if self.order_type != OrderType.TRAIL_STOP_LIMIT:
                 raise ValueError("limit_price is required for LIMIT/STOP_LIMIT orders.")
@@ -156,6 +172,7 @@ class Transaction:
     :Example:
         >>> Transaction(id='t1', order_id='o1', symbol='AAPL', quantity=5, price=190.0, commission=0.0, timestamp=datetime.now())
     """
+
     id: str
     order_id: str
     symbol: str
@@ -163,14 +180,14 @@ class Transaction:
     price: float
     commission: float
     timestamp: datetime
-    
+
     def __post_init__(self):
         """Assign defaults when omitted (id, timestamp)."""
         if self.id is None:
             self.id = str(uuid.uuid4())
         if self.timestamp is None:
             self.timestamp = datetime.now()
-    
+
     @property
     def value(self) -> float:
         """Return signed transaction value (quantity * price).
@@ -186,7 +203,7 @@ class Position:
 
     Tracks signed quantity, average cost basis, and current marked value.
     """
-    
+
     def __init__(self, symbol: str):
         """Initialize a position for ``symbol`` with zero quantity.
 
@@ -197,7 +214,7 @@ class Position:
         self.quantity = 0.0
         self.cost_basis = 0.0
         self.market_value = 0.0
-    
+
     def update(self, quantity: float, price: float) -> None:
         """Update state in response to a transaction fill.
 
@@ -225,7 +242,7 @@ class Position:
             elif self.quantity * (self.quantity - quantity) < 0:
                 # Position flipped from long to short or vice versa
                 self.cost_basis = price
-    
+
     def update_market_value(self, price: float) -> None:
         """Mark the position to ``price`` to compute current market value.
 
@@ -235,7 +252,7 @@ class Position:
         :rtype: None
         """
         self.market_value = self.quantity * price
-    
+
     def unrealized_pnl(self) -> float:
         """Return unrealized P&L based on marked value and cost basis.
 
@@ -253,11 +270,14 @@ class Broker:
     a simple cash and positions ledger and exposes helpers for market value
     updates using Polars-only inputs.
     """
-    
-    def __init__(self, initial_cash: float = 100000.0,
-                slippage_model: Optional[SlippageModel] = None,
-                commission_model: Optional[CommissionModel] = None,
-                data_portal: Optional[object] = None):
+
+    def __init__(
+        self,
+        initial_cash: float = 100000.0,
+        slippage_model: Optional[SlippageModel] = None,
+        commission_model: Optional[CommissionModel] = None,
+        data_portal: Optional[object] = None,
+    ):
         """Initialize the broker with optional models and a data portal.
 
         :param initial_cash: Initial cash balance.
@@ -277,11 +297,14 @@ class Broker:
         self.positions: Dict[str, Position] = {}
         self.orders: List[Order] = []
         self.transactions: List[Transaction] = []
-        
+
         # Default models
         self.slippage_model = slippage_model or FixedSlippageModel()
         # Default to zero-cost per-share if none provided; engine/strategy can override
-        self.commission_model: CommissionModel = commission_model or PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
+        self.commission_model: CommissionModel = (
+            commission_model
+            or PerShareCommissionModel(cost_per_share=0.0, min_trade_cost=0.0)
+        )
         # Optional DataPortal reference
         self._data_portal = data_portal
 
@@ -294,7 +317,7 @@ class Broker:
         :rtype: None
         """
         self._data_portal = data_portal
-    
+
     def place_order(self, signal: Signal) -> Order:
         """Create and register an `Order` from a strategy `Signal`.
 
@@ -319,38 +342,40 @@ class Broker:
         quantity = qty_in  # preserve sign as provided by caller
 
         # Extract optional params from Signal if present
-        limit_price = getattr(signal, 'limit_price', None)
+        limit_price = getattr(signal, "limit_price", None)
         if limit_price is None:
             # Back-compat: some code uses 'price' for limit
-            limit_price = getattr(signal, 'price', None)
-        stop_price = getattr(signal, 'stop_price', None)
-        trail_amount = getattr(signal, 'trail_amount', None)
-        trail_percent = getattr(signal, 'trail_percent', None)
-        trigger_on_range = getattr(signal, 'trigger_on_range', True)
+            limit_price = getattr(signal, "price", None)
+        stop_price = getattr(signal, "stop_price", None)
+        trail_amount = getattr(signal, "trail_amount", None)
+        trail_percent = getattr(signal, "trail_percent", None)
+        trigger_on_range = getattr(signal, "trigger_on_range", True)
 
         # Bracket params from signal
-        take_profit_price = getattr(signal, 'take_profit_price', None)
-        stop_loss_price = getattr(signal, 'stop_loss_price', None)
-        stop_limit_price = getattr(signal, 'stop_limit_price', None)  # optional limit for stop-limit child
-        stop_trail_amount = getattr(signal, 'stop_trail_amount', None)
-        stop_trail_percent = getattr(signal, 'stop_trail_percent', None)
+        take_profit_price = getattr(signal, "take_profit_price", None)
+        stop_loss_price = getattr(signal, "stop_loss_price", None)
+        stop_limit_price = getattr(
+            signal, "stop_limit_price", None
+        )  # optional limit for stop-limit child
+        stop_trail_amount = getattr(signal, "stop_trail_amount", None)
+        stop_trail_percent = getattr(signal, "stop_trail_percent", None)
 
         # Resolve order_type
-        raw_type = getattr(signal, 'order_type', None)
+        raw_type = getattr(signal, "order_type", None)
         order_type: OrderType
         if raw_type:
             rt = str(raw_type).lower()
-            if rt == 'market':
+            if rt == "market":
                 order_type = OrderType.MARKET
-            elif rt == 'limit':
+            elif rt == "limit":
                 order_type = OrderType.LIMIT
-            elif rt == 'stop':
+            elif rt == "stop":
                 order_type = OrderType.STOP
-            elif rt == 'stop_limit':
+            elif rt == "stop_limit":
                 order_type = OrderType.STOP_LIMIT
-            elif rt == 'trail_stop':
+            elif rt == "trail_stop":
                 order_type = OrderType.TRAIL_STOP
-            elif rt == 'trail_stop_limit':
+            elif rt == "trail_stop_limit":
                 order_type = OrderType.TRAIL_STOP_LIMIT
             else:
                 # Unknown text, fall back to inference below
@@ -394,16 +419,27 @@ class Broker:
         self.orders.append(order)
 
         # Attach bracket metadata to be materialized upon fill
-        order._bracket_take_profit_price = float(take_profit_price) if take_profit_price is not None else None  # type: ignore[attr-defined]
-        order._bracket_stop_loss_price = float(stop_loss_price) if stop_loss_price is not None else None  # type: ignore[attr-defined]
-        order._bracket_stop_limit_price = float(stop_limit_price) if stop_limit_price is not None else None  # type: ignore[attr-defined]
-        order._bracket_stop_trail_amount = float(stop_trail_amount) if stop_trail_amount is not None else None  # type: ignore[attr-defined]
-        order._bracket_stop_trail_percent = float(stop_trail_percent) if stop_trail_percent is not None else None  # type: ignore[attr-defined]
-
+        order._bracket_take_profit_price = (
+            float(take_profit_price) if take_profit_price is not None else None
+        )  # type: ignore[attr-defined]
+        order._bracket_stop_loss_price = (
+            float(stop_loss_price) if stop_loss_price is not None else None
+        )  # type: ignore[attr-defined]
+        order._bracket_stop_limit_price = (
+            float(stop_limit_price) if stop_limit_price is not None else None
+        )  # type: ignore[attr-defined]
+        order._bracket_stop_trail_amount = (
+            float(stop_trail_amount) if stop_trail_amount is not None else None
+        )  # type: ignore[attr-defined]
+        order._bracket_stop_trail_percent = (
+            float(stop_trail_percent) if stop_trail_percent is not None else None
+        )  # type: ignore[attr-defined]
 
         return order
-    
-    def execute_orders(self, market_data: Dict[str, pl.DataFrame], timestamp: datetime) -> List[Transaction]:
+
+    def execute_orders(
+        self, market_data: Dict[str, pl.DataFrame], timestamp: datetime
+    ) -> List[Transaction]:
         """Execute pending orders using a per-timestamp market snapshot.
 
         Execution semantics:
@@ -424,19 +460,21 @@ class Broker:
             >>> fills = broker.execute_orders(market_data, ts)
         """
         executed_transactions: List[Transaction] = []
- 
+
         def bar_prices(df: pl.DataFrame) -> Tuple[float, float, float, float]:
-            """
-            Return (open, high, low, close) from DataFrame with sensible fallbacks.
-            """
+            """Return (open, high, low, close) from DataFrame with sensible fallbacks."""
             c = float(df.item(-1, "close"))
-            o = float(df.item(-1, "open")) if 'open' in df.columns else c
-            h = float(df.item(-1, "high")) if 'high' in df.columns else max(c, o)
-            l = float(df.item(-1, "low")) if 'low' in df.columns else min(c, o)
+            o = float(df.item(-1, "open")) if "open" in df.columns else c
+            h = float(df.item(-1, "high")) if "high" in df.columns else max(c, o)
+            l = float(df.item(-1, "low")) if "low" in df.columns else min(c, o)
             return o, h, l, c
 
         for order in self.orders:
-            if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]:
+            if order.status in [
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+            ]:
                 continue
             # Missing data for this symbol at this timestamp: defer instead of rejecting.
             if order.symbol not in market_data:
@@ -467,9 +505,13 @@ class Broker:
                 # Compute dynamic stop
                 if order.trail_amount is not None:
                     if is_buy:
-                        order.dynamic_stop = order.trail_ref_price + float(order.trail_amount)
+                        order.dynamic_stop = order.trail_ref_price + float(
+                            order.trail_amount
+                        )
                     else:
-                        order.dynamic_stop = order.trail_ref_price - float(order.trail_amount)
+                        order.dynamic_stop = order.trail_ref_price - float(
+                            order.trail_amount
+                        )
                 else:
                     pct = float(order.trail_percent or 0.0)
                     if is_buy:
@@ -482,7 +524,11 @@ class Broker:
             if order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
                 stop_level = float(order.stop_price)
             elif order.order_type in (OrderType.TRAIL_STOP, OrderType.TRAIL_STOP_LIMIT):
-                stop_level = float(order.dynamic_stop) if order.dynamic_stop is not None else None
+                stop_level = (
+                    float(order.dynamic_stop)
+                    if order.dynamic_stop is not None
+                    else None
+                )
 
             # Evaluate triggers
             def crossed() -> bool:
@@ -513,7 +559,12 @@ class Broker:
                 else:
                     if (is_buy and c <= lim) or (not is_buy and c >= lim):
                         should_attempt_fill = True
-            elif order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAIL_STOP, OrderType.TRAIL_STOP_LIMIT):
+            elif order.order_type in (
+                OrderType.STOP,
+                OrderType.STOP_LIMIT,
+                OrderType.TRAIL_STOP,
+                OrderType.TRAIL_STOP_LIMIT,
+            ):
                 if not order.triggered and crossed():
                     order.triggered = True
                     # For gaps: choose first available price consistent with direction
@@ -525,9 +576,15 @@ class Broker:
                     else:
                         effective_order_type = OrderType.LIMIT
                         # For trailing stop limit: if limit missing, default to stop_level to create a peg
-                        lim = order.limit_price if order.limit_price is not None else stop_level
+                        lim = (
+                            order.limit_price
+                            if order.limit_price is not None
+                            else stop_level
+                        )
                         order.limit_price = lim
-                        if (is_buy and c <= float(lim)) or (not is_buy and c >= float(lim)):
+                        if (is_buy and c <= float(lim)) or (
+                            not is_buy and c >= float(lim)
+                        ):
                             should_attempt_fill = True
 
             if not should_attempt_fill:
@@ -537,7 +594,14 @@ class Broker:
             base_price = c
             if effective_order_type == OrderType.MARKET:
                 # If triggered due to gap, approximate fill at open; else use close
-                if order.triggered and order.trigger_on_range and ((is_buy and o >= (stop_level or -float('inf'))) or (not is_buy and o <= (stop_level or float('inf')))):
+                if (
+                    order.triggered
+                    and order.trigger_on_range
+                    and (
+                        (is_buy and o >= (stop_level or -float("inf")))
+                        or (not is_buy and o <= (stop_level or float("inf")))
+                    )
+                ):
                     base_price = o
                 else:
                     base_price = c
@@ -547,19 +611,27 @@ class Broker:
                 base_price = c
 
             # Apply slippage to execution price
-            exec_price = self.slippage_model.apply_slippage(base_price, order.quantity, symbol_data, is_buy)
+            exec_price = self.slippage_model.apply_slippage(
+                base_price, order.quantity, symbol_data, is_buy
+            )
 
             # Commission and affordability
             unfilled = order.quantity - order.filled_quantity
             trade_value = unfilled * exec_price
-            commission_cost = self.commission_model.calculate_commission(exec_price, unfilled)
+            commission_cost = self.commission_model.calculate_commission(
+                exec_price, unfilled
+            )
             if is_buy and (trade_value + commission_cost > self.cash):
-                max_affordable = self.cash / (exec_price + (commission_cost / max(abs(unfilled), 1e-9)))
+                max_affordable = self.cash / (
+                    exec_price + (commission_cost / max(abs(unfilled), 1e-9))
+                )
                 if max_affordable <= 0:
                     continue
                 unfilled = min(unfilled, max_affordable)
                 trade_value = unfilled * exec_price
-                commission_cost = self.commission_model.calculate_commission(exec_price, unfilled)
+                commission_cost = self.commission_model.calculate_commission(
+                    exec_price, unfilled
+                )
 
             # Execute
             transaction = Transaction(
@@ -569,15 +641,18 @@ class Broker:
                 quantity=unfilled,
                 price=exec_price,
                 commission=commission_cost,
-                timestamp=timestamp
+                timestamp=timestamp,
             )
 
             # Update order status
             prev_filled = order.filled_quantity
             order.filled_quantity += unfilled
             order.filled_price = (
-                ((order.filled_price or 0.0) * prev_filled) + (exec_price * unfilled)
-            ) / order.filled_quantity if order.filled_quantity > 0 else exec_price
+                (((order.filled_price or 0.0) * prev_filled) + (exec_price * unfilled))
+                / order.filled_quantity
+                if order.filled_quantity > 0
+                else exec_price
+            )
 
             if abs(order.filled_quantity - order.quantity) < 1e-6:
                 order.status = OrderStatus.FILLED
@@ -585,8 +660,10 @@ class Broker:
                 order.status = OrderStatus.PARTIALLY_FILLED
 
             # Update position and cash
-            self._update_position(transaction.symbol, transaction.quantity, transaction.price)
-            self.cash -= (trade_value + commission_cost)
+            self._update_position(
+                transaction.symbol, transaction.quantity, transaction.price
+            )
+            self.cash -= trade_value + commission_cost
 
             # Record transaction
             self.transactions.append(transaction)
@@ -595,12 +672,20 @@ class Broker:
             # OCO logic: if this order is part of an OCO group and is (fully) filled, cancel siblings
             if order.oco_group_id and order.status == OrderStatus.FILLED:
                 for other in self.orders:
-                    if other.id != order.id and other.oco_group_id == order.oco_group_id:
-                        if other.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
+                    if (
+                        other.id != order.id
+                        and other.oco_group_id == order.oco_group_id
+                    ):
+                        if other.status in [
+                            OrderStatus.OPEN,
+                            OrderStatus.PARTIALLY_FILLED,
+                        ]:
                             other.status = OrderStatus.CANCELLED
 
             # Bracket materialization: when a parent fills for the first time, create children
-            if hasattr(order, "_bracket_take_profit_price") or hasattr(order, "_bracket_stop_loss_price"):
+            if hasattr(order, "_bracket_take_profit_price") or hasattr(
+                order, "_bracket_stop_loss_price"
+            ):
                 # Only create children when parent is fully filled (common behavior)
                 if order.status == OrderStatus.FILLED:
                     tp = getattr(order, "_bracket_take_profit_price", None)
@@ -609,7 +694,12 @@ class Broker:
                     trl_amt = getattr(order, "_bracket_stop_trail_amount", None)
                     trl_pct = getattr(order, "_bracket_stop_trail_percent", None)
 
-                    if tp is not None or sl is not None or trl_amt is not None or trl_pct is not None:
+                    if (
+                        tp is not None
+                        or sl is not None
+                        or trl_amt is not None
+                        or trl_pct is not None
+                    ):
                         oco_id = str(uuid.uuid4())
                         child_qty = -order.quantity  # opposite side to exit position
 
@@ -631,22 +721,34 @@ class Broker:
                         # Stop child: static/stop-limit or trailing
                         if trl_amt is not None or trl_pct is not None:
                             # Trailing stop or trailing stop-limit (if sll provided)
-                            ot = OrderType.TRAIL_STOP_LIMIT if sll is not None else OrderType.TRAIL_STOP
+                            ot = (
+                                OrderType.TRAIL_STOP_LIMIT
+                                if sll is not None
+                                else OrderType.TRAIL_STOP
+                            )
                             stop_child = Order(
                                 id=str(uuid.uuid4()),
                                 symbol=order.symbol,
                                 quantity=child_qty,
                                 order_type=ot,
                                 limit_price=float(sll) if sll is not None else None,
-                                trail_amount=float(trl_amt) if trl_amt is not None else None,
-                                trail_percent=float(trl_pct) if trl_pct is not None else None,
+                                trail_amount=(
+                                    float(trl_amt) if trl_amt is not None else None
+                                ),
+                                trail_percent=(
+                                    float(trl_pct) if trl_pct is not None else None
+                                ),
                                 trigger_on_range=True,
                                 # Correctly seed trail_ref_price from parent fill
                                 trail_ref_price=order.filled_price,
                             )
                         elif sl is not None:
                             # Static stop or stop-limit
-                            ot = OrderType.STOP_LIMIT if sll is not None else OrderType.STOP
+                            ot = (
+                                OrderType.STOP_LIMIT
+                                if sll is not None
+                                else OrderType.STOP
+                            )
                             stop_child = Order(
                                 id=str(uuid.uuid4()),
                                 symbol=order.symbol,
@@ -668,7 +770,12 @@ class Broker:
         return executed_transactions
 
     # Convenience path to ensure all market data access can go through DataPortal
-    def execute_orders_with_portal(self, symbols: List[str], timestamp: datetime, market_hours: Optional[tuple] = None) -> List[Transaction]:
+    def execute_orders_with_portal(
+        self,
+        symbols: List[str],
+        timestamp: datetime,
+        market_hours: Optional[tuple] = None,
+    ) -> List[Transaction]:
         """Fetch a snapshot via `DataPortal` and execute orders.
 
         :param symbols: Symbols to include in the snapshot.
@@ -683,20 +790,24 @@ class Broker:
         try:
             dp = self._data_portal
             if dp is None:
-                raise RuntimeError("DataPortal is not set on Broker. Pass it into Broker(...) at initialization.")
-            ts_slice = dp.get_slice_for_timestamp(timestamp, sorted(list(symbols)), market_hours=market_hours)
+                raise RuntimeError(
+                    "DataPortal is not set on Broker. Pass it into Broker(...) at initialization."
+                )
+            ts_slice = dp.get_slice_for_timestamp(
+                timestamp, sorted(list(symbols)), market_hours=market_hours
+            )
         except Exception:
             ts_slice = pl.DataFrame()
         # Build symbol->DataFrame map
         market_data_dict: Dict[str, pl.DataFrame] = {}
-        if not ts_slice.is_empty() and 'symbol' in ts_slice.columns:
-            s = ts_slice.get_column('symbol')
+        if not ts_slice.is_empty() and "symbol" in ts_slice.columns:
+            s = ts_slice.get_column("symbol")
             if s.dtype != pl.String:
-                ts_slice = ts_slice.with_columns(pl.col('symbol').cast(pl.Utf8))
-            for (sym,), grp in ts_slice.group_by('symbol', maintain_order=True):
+                ts_slice = ts_slice.with_columns(pl.col("symbol").cast(pl.Utf8))
+            for (sym,), grp in ts_slice.group_by("symbol", maintain_order=True):
                 market_data_dict[str(sym)] = grp
         return self.execute_orders(market_data_dict, timestamp)
-    
+
     def _update_position(self, symbol: str, quantity: float, price: float) -> None:
         """Update positions dictionary for a symbol after a fill.
 
@@ -711,9 +822,9 @@ class Broker:
         """
         if symbol not in self.positions:
             self.positions[symbol] = Position(symbol)
-        
+
         self.positions[symbol].update(quantity, price)
-    
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open or partially filled order by id.
 
@@ -723,11 +834,14 @@ class Broker:
         :rtype: bool
         """
         for order in self.orders:
-            if order.id == order_id and order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]:
+            if order.id == order_id and order.status in [
+                OrderStatus.OPEN,
+                OrderStatus.PARTIALLY_FILLED,
+            ]:
                 order.status = OrderStatus.CANCELLED
                 return True
         return False
-    
+
     def get_position(self, symbol: str) -> Optional[Position]:
         """Return position object for symbol, if present.
 
@@ -737,7 +851,7 @@ class Broker:
         :rtype: Optional[Position]
         """
         return self.positions.get(symbol)
-    
+
     def get_order(self, order_id: str) -> Optional[Order]:
         """Return order by id if it exists.
 
@@ -750,7 +864,7 @@ class Broker:
             if order.id == order_id:
                 return order
         return None
-    
+
     def update_market_values(self, market_data: Dict[str, pl.DataFrame]) -> None:
         """Mark all positions to market using provided snapshot.
 
@@ -763,7 +877,7 @@ class Broker:
             if symbol in market_data and not market_data[symbol].is_empty():
                 price = market_data[symbol].item(-1, "close")
                 position.update_market_value(price)
-    
+
     def get_portfolio_value(self) -> float:
         """Return total portfolio value (cash + marked positions).
 
@@ -772,7 +886,7 @@ class Broker:
         """
         positions_value = sum(pos.market_value for pos in self.positions.values())
         return self.cash + positions_value
-    
+
     def get_account(self) -> Dict[str, Any]:
         """Return a simplified account summary snapshot.
 
@@ -780,12 +894,16 @@ class Broker:
         :rtype: Dict[str, Any]
         """
         return {
-            'cash': self.cash,
-            'positions': {symbol: {
-                'quantity': pos.quantity,
-                'cost_basis': pos.cost_basis,
-                'market_value': pos.market_value,
-                'unrealized_pnl': pos.unrealized_pnl()
-            } for symbol, pos in self.positions.items() if abs(pos.quantity) > 1e-6},
-            'portfolio_value': self.get_portfolio_value(),
-        } 
+            "cash": self.cash,
+            "positions": {
+                symbol: {
+                    "quantity": pos.quantity,
+                    "cost_basis": pos.cost_basis,
+                    "market_value": pos.market_value,
+                    "unrealized_pnl": pos.unrealized_pnl(),
+                }
+                for symbol, pos in self.positions.items()
+                if abs(pos.quantity) > 1e-6
+            },
+            "portfolio_value": self.get_portfolio_value(),
+        }

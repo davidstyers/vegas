@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time, datetime
-from typing import Iterable
+from datetime import datetime
+
 import polars as pl
 
 
@@ -44,5 +44,3 @@ class TwentyFourSevenCalendar(TradingCalendar):
 
     def is_trading_time(self, dt: datetime) -> bool:
         return True
-
- 

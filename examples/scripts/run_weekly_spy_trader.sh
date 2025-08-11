@@ -65,4 +65,4 @@ python examples/weekly_spy_trader.py \
   --initial-capital "$INITIAL_CAPITAL"
 
 # Exit with the same exit code as the Python script
-exit $? 
+exit $?

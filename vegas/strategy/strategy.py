@@ -4,8 +4,9 @@ This module provides the base Strategy class for implementing trading strategies
 using an event-driven approach.
 """
 
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
 
 
@@ -44,6 +45,7 @@ class Signal:
     :Example:
         >>> Signal(symbol='AAPL', quantity=10, order_type='limit', limit_price=190.0)
     """
+
     symbol: str
     quantity: float
     order_type: Optional[str] = None
@@ -67,7 +69,7 @@ class Context:
     Provides references to the portfolio and engine and can carry arbitrary
     user-defined attributes during a backtest.
     """
-    
+
     def __init__(self):
         """Initialize an empty context with optional commission helper."""
         self._portfolio = None
@@ -80,11 +82,14 @@ class Context:
         # Expose a commission helper namespace to strategies:
         # usage: context.set_commission(commission.PerShare(...))
         try:
-            from vegas.broker.commission import commission as _commission_ns  # lazy import
+            from vegas.broker.commission import (
+                commission as _commission_ns,  # lazy import
+            )
+
             self.commission = _commission_ns
         except Exception:
             self.commission = None
-    
+
     def set_portfolio(self, portfolio):
         """Set the portfolio reference (used internally by the engine).
 
@@ -92,7 +97,7 @@ class Context:
         :type portfolio: Any
         """
         self._portfolio = portfolio
-        
+
     def set_engine(self, engine):
         """Set the `BacktestEngine` reference (used internally).
 
@@ -108,16 +113,16 @@ class Context:
     def get_commission_model(self):
         """Return the configured commission model (or None if not set)."""
         return self._commission_model
-    
+
     @property
     def portfolio(self):
         """Return the current portfolio state reference."""
         return self._portfolio
-    
+
     def __setattr__(self, name, value):
         """Set an attribute in the context state namespace."""
         self.__dict__[name] = value
-    
+
     def __getattr__(self, name):
         """Return attribute value or raise if not present."""
         if name in self.__dict__:
@@ -132,46 +137,48 @@ class Strategy:
     Optional hooks include `before_trading_start`, `on_market_open`,
     `on_market_close`, `on_bar`, `on_tick`, and `on_trade`.
     """
-    
+
     def __init__(self):
         """Create a strategy with a fresh `Context`."""
         self.context = Context()
-    
+
     def initialize(self, context: Context) -> None:
         """Hook called once at the beginning of the backtest.
 
         Use this to set up parameters and initialize state.
         """
         pass
-    
+
     def handle_data(self, context: Context, data: pd.DataFrame) -> List[Signal]:
         """Process market data and return a list of `Signal` objects."""
         return []
-    
+
     def before_trading_start(self, context: Context, data: pd.DataFrame) -> None:
         """Hook called at the beginning of each trading day (optional)."""
         pass
-    
+
     def on_market_open(self, context: Context, data: pd.DataFrame, portfolio) -> None:
         """Hook called at market open (optional)."""
         pass
-    
+
     def on_market_close(self, context: Context, data: pd.DataFrame, portfolio) -> None:
         """Hook called at market close (optional)."""
         pass
-    
+
     def on_bar(self, context: Context, data: pd.DataFrame) -> None:
         """Hook called when a new bar is received (optional)."""
         pass
-    
+
     def on_tick(self, context: Context, data: pd.DataFrame) -> None:
         """Hook called when a new tick is received (optional)."""
         pass
-    
-    def on_trade(self, context: Context, trade_event: Dict[str, Any], portfolio) -> None:
+
+    def on_trade(
+        self, context: Context, trade_event: Dict[str, Any], portfolio
+    ) -> None:
         """Hook called when a trade from this strategy is executed (optional)."""
         pass
-    
+
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:
         """Hook called at the end of the backtest for custom analysis (optional)."""
-        pass 
+        pass

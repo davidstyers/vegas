@@ -2,9 +2,12 @@
 
 This module defines factors for statistical transformations like Z-Score and ranking.
 """
+
+from typing import Optional
+
 import polars as pl
+
 from vegas.pipeline.factors.custom import CustomFactor
-from vegas.pipeline.terms import Term
 
 
 class ZScore(CustomFactor):
@@ -19,16 +22,17 @@ class ZScore(CustomFactor):
     :Example:
         >>> z = ZScore(my_factor)
     """
+
     window_length = 1  # Default to 1, since we only need the most recent values
-    
-    def __init__(self, term, mask=None):
+
+    def __init__(self, term, mask: Optional[object] = None):
         self.term = term
         super().__init__(
             inputs=[term],
             window_length=term.window_length,
             mask=mask or term.mask,
         )
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing Z-scores by date.
 
@@ -36,7 +40,7 @@ class ZScore(CustomFactor):
         :rtype: pl.Expr
         """
         expr = self.term.to_expression()
-        return (expr - expr.mean().over('date')) / (expr.std().over('date'))
+        return (expr - expr.mean().over("date")) / (expr.std().over("date"))
 
 
 class Rank(CustomFactor):
@@ -53,9 +57,16 @@ class Rank(CustomFactor):
     :Example:
         >>> r = Rank(my_factor, method='dense', ascending=False)
     """
+
     window_length = 1  # Default to 1, since we only need the most recent values
-    
-    def __init__(self, term, method='ordinal', ascending=True, mask=None):
+
+    def __init__(
+        self,
+        term,
+        method: str = "ordinal",
+        ascending: bool = True,
+        mask: Optional[object] = None,
+    ):
         self.term = term
         self.method = method
         self.ascending = ascending
@@ -64,14 +75,18 @@ class Rank(CustomFactor):
             window_length=term.window_length,
             mask=mask or term.mask,
         )
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing ranks by date.
 
         :returns: Polars expression of ranks.
         :rtype: pl.Expr
         """
-        return self.term.to_expression().rank(method=self.method, descending=not self.ascending).over('date')
+        return (
+            self.term.to_expression()
+            .rank(method=self.method, descending=not self.ascending)
+            .over("date")
+        )
 
 
 class Percentile(CustomFactor):
@@ -84,16 +99,17 @@ class Percentile(CustomFactor):
     :Example:
         >>> p = Percentile(my_factor)
     """
+
     window_length = 1  # Default to 1, since we only need the most recent values
-    
-    def __init__(self, term, mask=None):
+
+    def __init__(self, term, mask: Optional[object] = None):
         self.term = term
         super().__init__(
             inputs=[term],
             window_length=term.window_length,
             mask=mask or term.mask,
         )
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing percentiles by date.
 
@@ -101,4 +117,4 @@ class Percentile(CustomFactor):
         :rtype: pl.Expr
         """
         expr = self.term.to_expression()
-        return expr.rank(method='ordinal').over('date') / expr.count().over('date')
+        return expr.rank(method="ordinal").over("date") / expr.count().over("date")

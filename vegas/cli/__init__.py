@@ -5,4 +5,4 @@ This module provides a command-line interface for running backtests.
 
 from vegas.cli.main import main
 
-__all__ = ["main"] 
+__all__ = ["main"]

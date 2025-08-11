@@ -38,7 +38,7 @@ from datetime import datetime
 class MyStrategy(Strategy):
     def initialize(self, context):
         context.sma_window = 20
-        
+
     def handle_data(self, context, data):
         # Strategy logic here
         signals = []
@@ -57,4 +57,4 @@ results = engine.run(
 
 # Analyze results
 engine.get_results().plot_equity_curve()
-``` 
+```

@@ -35,7 +35,7 @@ To ingest all OHLCV files in a directory:
 vegas ingest-ohlcv --directory=path/to/directory
 ```
 
-> **IMPORTANT**: Always use the `ingest-ohlcv` command for OHLCV files, not the general `ingest` command. 
+> **IMPORTANT**: Always use the `ingest-ohlcv` command for OHLCV files, not the general `ingest` command.
 > The `ingest-ohlcv` command is specifically designed to handle the OHLCV file format with the `ts_event` column.
 
 ### Duplicate Data Prevention
@@ -170,4 +170,4 @@ files = glob.glob(os.path.join(directory, "*.ohlcv-1h.csv.zst"))
 for file in files:
     print(f"Ingesting {file}...")
     rows = data_layer.db_manager.ingest_ohlcv_file(file)
-    print(f"Ingested {rows} rows from {file}") 
+    print(f"Ingested {rows} rows from {file}")

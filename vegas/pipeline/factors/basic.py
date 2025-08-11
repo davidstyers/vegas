@@ -2,7 +2,11 @@
 
 This module defines common basic factors like Returns and moving averages.
 """
+
+from typing import Optional, Sequence
+
 import polars as pl
+
 from vegas.pipeline.factors.custom import CustomFactor
 
 
@@ -18,9 +22,10 @@ class Returns(CustomFactor):
     :Example:
         >>> Returns(inputs=["close"], window_length=2)
     """
-    inputs = ['close']
+
+    inputs = ["close"]
     window_length = 2  # Default to daily returns
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression for computing returns.
 
@@ -29,7 +34,9 @@ class Returns(CustomFactor):
         :Example:
             >>> expr = Returns().to_expression()
         """
-        return pl.col(self.inputs[0]).pct_change(n=self.window_length - 1).over('symbol')
+        return (
+            pl.col(self.inputs[0]).pct_change(n=self.window_length - 1).over("symbol")
+        )
 
 
 class SimpleMovingAverage(CustomFactor):
@@ -37,10 +44,12 @@ class SimpleMovingAverage(CustomFactor):
 
     Example:
         >>> sma = SimpleMovingAverage(inputs=['close'], window_length=10)
+
     """
-    inputs = ['close']  # Default to close prices
+
+    inputs = ["close"]  # Default to close prices
     window_length = 10  # Default to 10-day moving average
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression for SMA.
 
@@ -49,7 +58,7 @@ class SimpleMovingAverage(CustomFactor):
         :Example:
             >>> expr = SimpleMovingAverage().to_expression()
         """
-        return pl.col(self.inputs[0]).rolling_mean(self.window_length).over('symbol')
+        return pl.col(self.inputs[0]).rolling_mean(self.window_length).over("symbol")
 
 
 class ExponentialWeightedMovingAverage(CustomFactor):
@@ -64,13 +73,20 @@ class ExponentialWeightedMovingAverage(CustomFactor):
     :Example:
         >>> ewma = ExponentialWeightedMovingAverage(decay_rate=0.3)
     """
-    inputs = ['close']  # Default to close prices
+
+    inputs = ["close"]  # Default to close prices
     window_length = 10  # Default to 10-day moving average
-    
-    def __init__(self, inputs=None, window_length=None, decay_rate=0.5, mask=None):
+
+    def __init__(
+        self,
+        inputs: Optional[Sequence[str]] = None,
+        window_length: Optional[int] = None,
+        decay_rate: float = 0.5,
+        mask: Optional[object] = None,
+    ) -> None:
         self.decay_rate = decay_rate
         super().__init__(inputs=inputs, window_length=window_length, mask=mask)
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression for EWMA.
 
@@ -79,7 +95,11 @@ class ExponentialWeightedMovingAverage(CustomFactor):
         :Example:
             >>> expr = ExponentialWeightedMovingAverage().to_expression()
         """
-        return pl.col(self.inputs[0]).ewm_mean(alpha=self.decay_rate, adjust=False).over('symbol')
+        return (
+            pl.col(self.inputs[0])
+            .ewm_mean(alpha=self.decay_rate, adjust=False)
+            .over("symbol")
+        )
 
 
 class VWAP(CustomFactor):
@@ -87,9 +107,10 @@ class VWAP(CustomFactor):
 
     VWAP is the ratio of traded value to traded volume over a window (often one day).
     """
-    inputs = ['close', 'volume']
+
+    inputs = ["close", "volume"]
     window_length = 1  # Default to single day VWAP
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing VWAP.
 
@@ -98,14 +119,17 @@ class VWAP(CustomFactor):
         :Example:
             >>> expr = VWAP().to_expression()
         """
-        return (pl.col('close') * pl.col('volume')).sum().over('symbol') / pl.col('volume').sum().over('symbol')
+        return (pl.col("close") * pl.col("volume")).sum().over("symbol") / pl.col(
+            "volume"
+        ).sum().over("symbol")
 
 
 class StandardDeviation(CustomFactor):
     """Rolling standard deviation of a data input over a window."""
-    inputs = ['close']  # Default to close prices
+
+    inputs = ["close"]  # Default to close prices
     window_length = 10  # Default to 10-day window
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing rolling std by symbol.
 
@@ -114,4 +138,4 @@ class StandardDeviation(CustomFactor):
         :Example:
             >>> expr = StandardDeviation().to_expression()
         """
-        return pl.col(self.inputs[0]).rolling_std(self.window_length).over('symbol')
+        return pl.col(self.inputs[0]).rolling_std(self.window_length).over("symbol")

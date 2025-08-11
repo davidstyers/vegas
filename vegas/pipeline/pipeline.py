@@ -3,7 +3,8 @@
 This module defines the Pipeline class that represents a collection of computations
 to be executed at the start of each trading day.
 """
-from typing import Dict, Optional, Any
+
+from typing import Any, Dict, Optional
 
 
 class Pipeline:
@@ -13,7 +14,14 @@ class Pipeline:
     Classifiers) and an optional screen. The engine evaluates the pipeline over
     historical data and returns a Polars DataFrame for the given date(s).
     """
-    def __init__(self, columns: Optional[Dict[str, Any]] = None, screen=None, data_portal=None, frequency: str = '1h'):
+
+    def __init__(
+        self,
+        columns: Optional[Dict[str, Any]] = None,
+        screen: Any | None = None,
+        data_portal: Any | None = None,
+        frequency: str = "1h",
+    ) -> None:
         """Initialize a pipeline definition.
 
         :param columns: Mapping from result column name to `Term` (Factor/Filter/Classifier).
@@ -34,8 +42,8 @@ class Pipeline:
         self.screen = screen
         self.data_portal = data_portal
         self.frequency = frequency
-        
-    def add(self, term, name, overwrite=False):
+
+    def add(self, term: Any, name: str, overwrite: bool = False) -> "Pipeline":
         """Add a `Term` to the pipeline.
 
         :param term: Term to add.
@@ -51,11 +59,13 @@ class Pipeline:
             >>> pipe.add(my_factor, name="momentum")
         """
         if name in self.columns and not overwrite:
-            raise KeyError(f"Column '{name}' already exists. To overwrite, set overwrite=True.")
+            raise KeyError(
+                f"Column '{name}' already exists. To overwrite, set overwrite=True."
+            )
         self.columns[name] = term
         return self
-        
-    def remove(self, name):
+
+    def remove(self, name: str) -> Any:
         """Remove a column from the pipeline.
 
         :param name: Name of the column to remove.
@@ -69,8 +79,8 @@ class Pipeline:
         if name not in self.columns:
             raise KeyError(f"No column named '{name}' exists.")
         return self.columns.pop(name)
-        
-    def set_screen(self, screen, overwrite=False):
+
+    def set_screen(self, screen: Any, overwrite: bool = False) -> "Pipeline":
         """Attach or replace the pipeline screen.
 
         :param screen: Filter used to restrict output rows.
@@ -84,6 +94,8 @@ class Pipeline:
             >>> pipe.set_screen(my_filter, overwrite=True)
         """
         if self.screen is not None and not overwrite:
-            raise ValueError("Pipeline already has a screen. To overwrite, set overwrite=True.")
+            raise ValueError(
+                "Pipeline already has a screen. To overwrite, set overwrite=True."
+            )
         self.screen = screen
-        return self 
+        return self

@@ -56,11 +56,17 @@ class SimulatedBrokerAdapter(BrokerAdapter):
     def get_open_orders(self) -> List[Any]:
         # Expose the broker's open orders list if available
         try:
-            return [o for o in getattr(self._broker, "orders", []) if getattr(o, "status", "") in ("open", "partially_filled")]
+            return [
+                o
+                for o in getattr(self._broker, "orders", [])
+                if getattr(o, "status", "") in ("open", "partially_filled")
+            ]
         except Exception:
             return []
 
-    def simulate_execute(self, market_data: Dict[str, "pl.DataFrame"], timestamp: datetime) -> List[Any]:
+    def simulate_execute(
+        self, market_data: Dict[str, "pl.DataFrame"], timestamp: datetime
+    ) -> List[Any]:
         """Execute pending orders and store fills locally for polling."""
         transactions = self._broker.execute_orders(market_data, timestamp)
         if transactions:

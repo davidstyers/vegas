@@ -2,7 +2,9 @@
 
 This module defines more complex filters like All, Any, and AtLeastN.
 """
+
 import polars as pl
+
 from vegas.pipeline.terms import Filter, Term
 
 
@@ -14,12 +16,12 @@ class All(Filter):
     :Example:
         >>> mask = All(f1, f2, f3)
     """
-    
-    def __init__(self, *filters):
+
+    def __init__(self, *filters: Filter):
         self.filters = filters
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression for logical AND over inputs.
 
@@ -40,12 +42,12 @@ class Any(Filter):
     :Example:
         >>> mask = Any(f1, f2)
     """
-    
-    def __init__(self, *filters):
+
+    def __init__(self, *filters: Filter):
         self.filters = filters
         window_length = max([f.window_length for f in filters])
         super().__init__(inputs=list(filters), window_length=window_length)
-    
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression for logical OR over inputs.
 
@@ -69,19 +71,21 @@ class AtLeastN(Filter):
     :Example:
         >>> mask = AtLeastN(2, f1, f2, f3)
     """
-    
-    def __init__(self, n, *filters):
+
+    def __init__(self, n: int, *filters: Filter):
         self.n = n
         self.filters = filters
         window_length = max([f.window_length for f in filters])
-        
+
         if n < 1:
             raise ValueError(f"n must be at least 1, got {n}")
         if n > len(filters):
-            raise ValueError(f"n ({n}) cannot exceed the number of filters ({len(filters)})")
-        
+            raise ValueError(
+                f"n ({n}) cannot exceed the number of filters ({len(filters)})"
+            )
+
         super().__init__(inputs=list(filters), window_length=window_length)
-    
+
     def to_expression(self) -> pl.Expr:
         """Return a boolean expression for at least N True inputs.
 
@@ -99,11 +103,11 @@ class NotMissing(Filter):
     :Example:
         >>> mask = NotMissing(my_factor)
     """
-    
-    def __init__(self, term):
+
+    def __init__(self, term: Term):
         self.term = term
         super().__init__(inputs=[term], window_length=term.window_length)
-    
+
     def to_expression(self) -> pl.Expr:
         """Return a boolean mask for non-missing values.
 
@@ -126,15 +130,22 @@ class TopN(Filter):
     :Example:
         >>> mask = TopN(term=my_factor, n=100, ascending=False)
     """
-    def __init__(self, term: Term, n: int, ascending: bool = False, mask: Filter | None = None):
+
+    def __init__(
+        self, term: Term, n: int, ascending: bool = False, mask: Filter | None = None
+    ) -> None:
         if n < 1:
             raise ValueError(f"TopN requires n>=1, got {n}")
         self.term = term
         self.n = int(n)
         self.ascending = bool(ascending)
         # Respect provided mask or term.mask by threading it into the Filter base via self.mask
-        super().__init__(inputs=[term], window_length=term.window_length, mask=mask or getattr(term, 'mask', None))
-    
+        super().__init__(
+            inputs=[term],
+            window_length=term.window_length,
+            mask=mask or getattr(term, "mask", None),
+        )
+
     def to_expression(self) -> pl.Expr:
         """Return a boolean expression for top-N selection.
 

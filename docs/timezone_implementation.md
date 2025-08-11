@@ -41,22 +41,22 @@ def _convert_timestamp_timezone(self, df: pd.DataFrame) -> pd.DataFrame:
     """Convert dataframe timestamps to the configured timezone."""
     if df is None or df.empty or 'timestamp' not in df.columns:
         return df
-        
+
     # Make a copy to avoid modifying the original
     df = df.copy()
-    
+
     # Make sure timestamps are datetime objects
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-    
+
     # If timestamps don't have timezone info, assume UTC
     if df['timestamp'].dt.tz is None:
         df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-        
+
     # Convert to target timezone
     if self.timezone != 'UTC' or df['timestamp'].dt.tz.zone != self.timezone:
         df['timestamp'] = df['timestamp'].dt.tz_convert(self.timezone)
-        
+
     return df
 ```
 
@@ -94,4 +94,4 @@ For backward compatibility:
 2. **Cross-Market Trading**: Enhanced support for trading across markets in different timezones
 3. **Market Calendar Integration**: Integrate timezone handling with market calendars
 4. **Config File Support**: Allow timezone settings to be specified in configuration files
-5. **Timezone Metadata**: Add timezone metadata to saved backtest results 
+5. **Timezone Metadata**: Add timezone metadata to saved backtest results

@@ -83,12 +83,12 @@ class RegularHoursStrategy(Strategy):
     def initialize(self, context):
         # Setup for regular hours trading
         context.symbols = ["AAPL", "MSFT", "GOOG"]
-    
+
     def before_trading_start(self, context, data):
         # This will be called at the start of regular trading hours
         # (e.g., 9:30 AM for US markets)
         self.log.info(f"Market open: {data['timestamp'].iloc[0]}")
-    
+
     def handle_data(self, context, data):
         # This will only be called for data points during regular hours
         # if ignore_extended_hours is enabled
@@ -100,4 +100,4 @@ class RegularHoursStrategy(Strategy):
 - Check logs for how many data points are filtered out
 - Verify the market hours settings match your expectations
 - Examine timestamps in your strategy callbacks to confirm filtering
-- Compare results with and without extended hours to understand the impact 
+- Compare results with and without extended hours to understand the impact

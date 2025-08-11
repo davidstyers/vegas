@@ -20,7 +20,7 @@ echo "Vegas OHLCV Data Ingestion Example"
 echo "================================================"
 
 # Step 1: Ingest OHLCV files into the database
-echo 
+echo
 echo "Step 1: Ingesting OHLCV files into the database..."
 echo "Command: vegas ingest-ohlcv --directory $DATA_DIR --max-files 5"
 echo
@@ -50,4 +50,4 @@ vegas run examples/simple_ma_strategy.py --start 2018-05-01 --end 2018-05-31
 echo
 echo "OHLCV ingestion example completed!"
 echo "The Vegas backtesting engine now stores OHLCV data in Parquet format in the db directory."
-echo "Data is partitioned by year, month, and symbol for efficient querying." 
+echo "Data is partitioned by year, month, and symbol for efficient querying."

@@ -17,7 +17,7 @@ echo "Vegas DuckDB & Parquet Database Example"
 echo "================================================"
 
 # Step 1: Ingest data into the database
-echo 
+echo
 echo "Step 1: Ingesting data into the database..."
 echo "Command: vegas ingest --file $SAMPLE_DATA"
 echo
@@ -47,4 +47,4 @@ vegas run examples/simple_ma_strategy.py --start 2020-01-01 --end 2021-01-01
 echo
 echo "Database example completed!"
 echo "The Vegas backtesting engine can now use DuckDB and Parquet for efficient data storage and querying."
-echo "Data is automatically stored in Parquet format and queried using DuckDB." 
+echo "Data is automatically stored in Parquet format and queried using DuckDB."

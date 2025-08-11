@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 
 class CommissionModel(ABC):
     """Abstract base class for commission models."""
+
     @abstractmethod
     def calculate_commission(self, price: float, quantity: float) -> float:
         """Return commission for an order of `quantity` at `price`."""
@@ -17,19 +18,21 @@ class CommissionModel(ABC):
 
 class FixedCommissionModel(CommissionModel):
     """Fixed commission model charging a constant fee per trade."""
+
     def __init__(self, commission: float = 5.0):
         self.commission = commission
-    
+
     def calculate_commission(self, price: float, quantity: float) -> float:
         return self.commission if quantity != 0 else 0.0
 
 
 class PerShareCommissionModel(CommissionModel):
     """Per-share commission model with optional minimum charge."""
+
     def __init__(self, cost_per_share: float = 0.005, min_trade_cost: float = 1.0):
         self.cost_per_share = cost_per_share
         self.min_trade_cost = min_trade_cost
-    
+
     def calculate_commission(self, price: float, quantity: float) -> float:
         if quantity == 0:
             return 0.0
@@ -39,12 +42,17 @@ class PerShareCommissionModel(CommissionModel):
 
 class PercentageCommissionModel(CommissionModel):
     """Percentage-based commission model with min/max bounds."""
-    def __init__(self, percentage: float = 0.001, min_trade_cost: float = 1.0,
-                 max_trade_cost: float = float('inf')):
+
+    def __init__(
+        self,
+        percentage: float = 0.001,
+        min_trade_cost: float = 1.0,
+        max_trade_cost: float = float("inf"),
+    ):
         self.percentage = percentage
         self.min_trade_cost = min_trade_cost
         self.max_trade_cost = max_trade_cost
-    
+
     def calculate_commission(self, price: float, quantity: float) -> float:
         if quantity == 0:
             return 0.0
@@ -61,15 +69,29 @@ class commission:
 
     Example:
         >>> context.set_commission(commission.PerShare(0.005, 1.0))
+
     """
+
     @staticmethod
     def Fixed(commission: float = 5.0) -> CommissionModel:
         return FixedCommissionModel(commission=commission)
 
     @staticmethod
-    def PerShare(cost_per_share: float = 0.005, min_trade_cost: float = 1.0) -> CommissionModel:
-        return PerShareCommissionModel(cost_per_share=cost_per_share, min_trade_cost=min_trade_cost)
+    def PerShare(
+        cost_per_share: float = 0.005, min_trade_cost: float = 1.0
+    ) -> CommissionModel:
+        return PerShareCommissionModel(
+            cost_per_share=cost_per_share, min_trade_cost=min_trade_cost
+        )
 
     @staticmethod
-    def PerTrade(percent: float = 0.001, min_trade_cost: float = 1.0, max_trade_cost: float = float('inf')) -> CommissionModel:
-        return PercentageCommissionModel(percentage=percent, min_trade_cost=min_trade_cost, max_trade_cost=max_trade_cost)
+    def PerTrade(
+        percent: float = 0.001,
+        min_trade_cost: float = 1.0,
+        max_trade_cost: float = float("inf"),
+    ) -> CommissionModel:
+        return PercentageCommissionModel(
+            percentage=percent,
+            min_trade_cost=min_trade_cost,
+            max_trade_cost=max_trade_cost,
+        )

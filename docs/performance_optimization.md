@@ -52,14 +52,14 @@ result = self.get_bars_query.execute([symbol, start, end]).fetchdf()
 def get_bars_batch(self, symbols: List[str], start: datetime, end: datetime) -> Dict[str, pd.DataFrame]:
     """Retrieve OHLCV bars for multiple symbols in a single query."""
     result = self.get_bars_batch_query.execute([symbols, start, end]).fetchdf()
-    
+
     # Split the result by symbol
     symbol_dfs = {}
     for symbol in symbols:
         symbol_data = result[result['symbol'] == symbol]
         if not symbol_data.empty:
             symbol_dfs[symbol] = symbol_data.reset_index(drop=True)
-            
+
     return symbol_dfs
 ```
 
@@ -75,14 +75,14 @@ def get_universe(self, date: datetime) -> List[str]:
     date_key = pd.Timestamp(date).date()
     if date_key in self._date_symbol_map:
         return sorted(list(self._date_symbol_map[date_key]))
-    
+
     # Otherwise query the database
     result = self.get_universe_query.execute([date.date()]).fetchdf()
     symbols = result['symbol'].tolist()
-    
+
     # Update the cache
     self._date_symbol_map[date_key] = set(symbols)
-    
+
     return symbols
 ```
 
@@ -99,17 +99,17 @@ def load_multiple_files(self, directory: str = None, parallel: bool = True, num_
     if parallel and len(file_paths) > 1:
         if num_workers is None:
             num_workers = min(multiprocessing.cpu_count(), len(file_paths))
-            
+
         # Divide files among workers
         chunks = np.array_split(file_paths, num_workers)
-        
+
         # Process files in parallel
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = []
             for i, chunk in enumerate(chunks):
                 futures.append(executor.submit(
                     self._process_file_chunk, list(chunk), temp_dirs[i]))
-                
+
             # Wait for all tasks to complete
             for future in futures:
                 future.result()
@@ -136,7 +136,7 @@ def __init__(self, data_dir: str = "data", mem_limit_gb: float = None):
         # Convert GB to bytes
         mem_limit_bytes = int(mem_limit_gb * 1024 * 1024 * 1024)
         config = {"memory_limit": f"{mem_limit_bytes}B"}
-        
+
     self.db_conn = duckdb.connect(":memory:", config=config)
 ```
 
@@ -158,10 +158,10 @@ def run_multiple_strategies(self, strategies: List[Strategy], start: datetime, e
     for strategy in strategies:
         if hasattr(strategy, 'required_symbols'):
             all_symbols.update(strategy.required_symbols)
-            
+
     # Preload data once for all strategies
     self._preload_data(start, end, list(all_symbols))
-    
+
     # Run each strategy
     results = {}
     for strategy in strategies:
@@ -185,7 +185,7 @@ def _preload_data(self, start: datetime, end: datetime, symbols: List[str] = Non
     date_range = pd.date_range(start.date(), end.date())
     for date in date_range:
         self.get_universe(date)
-        
+
     # Preload data for each symbol in batches
     batch_size = 50
     for i in range(0, len(symbols), batch_size):
@@ -267,4 +267,4 @@ engine = BacktestEngine(
 
 ## Conclusion
 
-These optimization techniques allow Vegas to efficiently process large financial datasets while maintaining accuracy. The system's modular design allows for selecting the appropriate optimization techniques based on your specific backtesting needs and hardware capabilities. 
+These optimization techniques allow Vegas to efficiently process large financial datasets while maintaining accuracy. The system's modular design allows for selecting the appropriate optimization techniques based on your specific backtesting needs and hardware capabilities.

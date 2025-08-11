@@ -63,4 +63,4 @@ echo "Results:"
 echo "- Equity curve plot: $OUTPUT_FILE"
 echo "- Results CSV: $RESULTS_CSV"
 echo "- QuantStats report: strategy_report.html"
-echo 
+echo

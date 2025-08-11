@@ -27,17 +27,18 @@ Design goals and rationale:
   workflows resilient.
 """
 
-from datetime import datetime, timedelta
 import logging
 import time
-import polars as pl
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from vegas.data import DataLayer, DataPortal
-from vegas.strategy import Strategy, Context, Signal
-from vegas.portfolio import Portfolio
+import polars as pl
+
 from vegas.broker import Broker
+from vegas.data import DataLayer, DataPortal
 from vegas.pipeline.engine import PipelineEngine
+from vegas.portfolio import Portfolio
+from vegas.strategy import Context, Signal, Strategy
 
 
 class BacktestEngine:
@@ -61,8 +62,9 @@ class BacktestEngine:
         ... #     strategy=my_strategy_instance,
         ... #     initial_capital=100_000.0,
         ... # )
+
     """
-    
+
     def __init__(self, data_dir: str = "db", timezone: str = "UTC") -> None:
         """Initialize the backtest engine and its dependencies.
 
@@ -81,9 +83,11 @@ class BacktestEngine:
         :Example:
             >>> engine = BacktestEngine(data_dir="db", timezone="UTC")
         """
-        self._logger = logging.getLogger('vegas.engine')
-        self._logger.info(f"Initializing BacktestEngine with data directory: {data_dir}, timezone: {timezone}")
-        
+        self._logger = logging.getLogger("vegas.engine")
+        self._logger.info(
+            f"Initializing BacktestEngine with data directory: {data_dir}, timezone: {timezone}"
+        )
+
         self.data_layer = DataLayer(data_dir, timezone=timezone)
         self.data_layer.engine = self
         self.data_portal = DataPortal(self.data_layer)
@@ -91,21 +95,26 @@ class BacktestEngine:
         self.portfolio: Optional[Portfolio] = None
         self.broker: Optional[Broker] = None
         self.timezone = timezone
-        
+
         # Trading hours configuration defaults to US RTH. Users can override via
         # ``set_trading_hours`` or disable filtering via ``ignore_extended_hours``.
         self._market_open_time = "09:30"
         self._market_close_time = "16:00"
         self._market_name = "US"
         self._ignore_extended_hours = False
-        
+
         # Pipeline scheduling engine: pipelines are computed once per day to
         # support ranking/screening workflows aligned to the research cadence.
         self.pipeline_engine = PipelineEngine(self.data_portal)
         self.attached_pipelines: Dict[str, Any] = {}
         self._pipeline_results: Dict[str, pl.DataFrame] = {}
-    
-    def set_trading_hours(self, market_name: str = "US", open_time: str = "09:30", close_time: str = "16:00") -> None:
+
+    def set_trading_hours(
+        self,
+        market_name: str = "US",
+        open_time: str = "09:30",
+        close_time: str = "16:00",
+    ) -> None:
         """Set the Regular Trading Hours (RTH) window used by the engine.
 
         This configuration is applied when ``ignore_extended_hours`` is set to
@@ -126,8 +135,10 @@ class BacktestEngine:
         self._market_name = market_name
         self._market_open_time = open_time
         self._market_close_time = close_time
-        self._logger.info(f"Set trading hours for {market_name}: {open_time} to {close_time}")
-        
+        self._logger.info(
+            f"Set trading hours for {market_name}: {open_time} to {close_time}"
+        )
+
     def ignore_extended_hours(self, ignore: bool = True) -> None:
         """Control whether to restrict data to Regular Trading Hours (RTH).
 
@@ -146,7 +157,7 @@ class BacktestEngine:
         self._ignore_extended_hours = ignore
         status = "ignored" if ignore else "included"
         self._logger.info(f"Extended hours data will be {status}")
-    
+
     def attach_pipeline(self, pipeline: Any, name: str) -> Any:
         """Register a pipeline to compute once per trading day.
 
@@ -170,7 +181,7 @@ class BacktestEngine:
         self._logger.info(f"Attaching pipeline '{name}'")
         self.attached_pipelines[name] = pipeline
         return pipeline
-    
+
     def pipeline_output(self, name: str) -> pl.DataFrame:
         """Return results for a previously attached pipeline for the current day.
 
@@ -189,7 +200,9 @@ class BacktestEngine:
             ...     do_something(output)
         """
         if name not in self._pipeline_results:
-            self._logger.warning(f"No pipeline named '{name}' has been attached or computed")
+            self._logger.warning(
+                f"No pipeline named '{name}' has been attached or computed"
+            )
             # Return empty DataFrame instead of raising an error
             return pl.DataFrame()
         return self._pipeline_results[name]
@@ -210,11 +223,17 @@ class BacktestEngine:
         """
         symbols: Set[str] = set()
         try:
-            if self.broker is not None and hasattr(self.broker, 'orders'):
-                from vegas.broker.broker import OrderStatus  # local import to avoid cycles at module import time
+            if self.broker is not None and hasattr(self.broker, "orders"):
+                from vegas.broker.broker import (  # local import to avoid cycles at module import time
+                    OrderStatus,
+                )
+
                 for order in self.broker.orders:
-                    if getattr(order, 'status', None) in (OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED):
-                        sym = getattr(order, 'symbol', None)
+                    if getattr(order, "status", None) in (
+                        OrderStatus.OPEN,
+                        OrderStatus.PARTIALLY_FILLED,
+                    ):
+                        sym = getattr(order, "symbol", None)
                         if sym:
                             symbols.add(sym)
         except Exception:
@@ -236,7 +255,7 @@ class BacktestEngine:
         """
         symbols: Set[str] = set()
         try:
-            if self.portfolio is not None and hasattr(self.portfolio, 'positions'):
+            if self.portfolio is not None and hasattr(self.portfolio, "positions"):
                 for sym, qty in self.portfolio.positions.items():
                     try:
                         if abs(float(qty)) > 1e-6:
@@ -271,13 +290,13 @@ class BacktestEngine:
             universe |= self._get_open_order_symbols()
             if signals:
                 for sig in signals:
-                    sym = getattr(sig, 'symbol', None)
+                    sym = getattr(sig, "symbol", None)
                     if sym:
                         universe.add(sym)
         except Exception:
             pass
         return universe
-        
+
     def _is_regular_market_hours(self, timestamp: datetime) -> bool:
         """Return whether ``timestamp`` falls within configured RTH.
 
@@ -294,13 +313,13 @@ class BacktestEngine:
             True
         """
         # Parse market hours once to minutes to use a cheap integer comparison.
-        open_hour, open_minute = map(int, self._market_open_time.split(':'))
-        close_hour, close_minute = map(int, self._market_close_time.split(':'))
+        open_hour, open_minute = map(int, self._market_open_time.split(":"))
+        close_hour, close_minute = map(int, self._market_close_time.split(":"))
         timestamp_minutes = timestamp.hour * 60 + timestamp.minute
         open_minutes = open_hour * 60 + open_minute
         close_minutes = close_hour * 60 + close_minute
         return open_minutes <= timestamp_minutes < close_minutes
-    
+
     def load_data(
         self,
         file_path: Optional[str] = None,
@@ -335,12 +354,16 @@ class BacktestEngine:
             self.data_layer.load_data(file_path=file_path)
         elif directory:
             self._logger.info(f"Loading data from directory: {directory}")
-            self.data_layer.load_data(directory=directory, file_pattern=file_pattern, max_files=max_files)
+            self.data_layer.load_data(
+                directory=directory, file_pattern=file_pattern, max_files=max_files
+            )
         elif not self.data_layer.is_initialized():
-            raise ValueError("No data source specified and no data is currently loaded.")
+            raise ValueError(
+                "No data source specified and no data is currently loaded."
+            )
         else:
             self._logger.info("Using already loaded data")
-            
+
         # Provide a concise summary to help users validate the time range and coverage.
         data_info = self.data_layer.get_data_info()
         self._logger.info(
@@ -348,7 +371,7 @@ class BacktestEngine:
             f"{data_info.get('symbol_count', 0)} symbols, "
             f"from {data_info.get('start_date', 'unknown')} to {data_info.get('end_date', 'unknown')}"
         )
-    
+
     def run(
         self,
         start: datetime,
@@ -379,21 +402,28 @@ class BacktestEngine:
             >>> results = engine.run(start, end, my_strategy, initial_capital=50_000)
         """
         self._logger.info(f"Starting backtest from {start} to {end}")
-        
+
         # Initialize strategy and portfolio
         self.strategy = strategy
 
-        self.portfolio = Portfolio(initial_capital=initial_capital, data_portal=self.data_portal)
+        self.portfolio = Portfolio(
+            initial_capital=initial_capital, data_portal=self.data_portal
+        )
         self.broker = Broker(initial_cash=initial_capital, data_portal=self.data_portal)
-        
+
         # Get context and initialize strategy
         context = self.strategy.context
-        context.set_portfolio(self.portfolio)  # Make portfolio accessible to strategy code
-        context.set_engine(self)  # Allow strategies to access engine helpers like pipelines
+        context.set_portfolio(
+            self.portfolio
+        )  # Make portfolio accessible to strategy code
+        context.set_engine(
+            self
+        )  # Allow strategies to access engine helpers like pipelines
 
         # Expose commission namespace prior to initialize to make configuration ergonomic.
         try:
             from vegas.broker.commission import commission as _commission_ns
+
             context.commission = _commission_ns
         except Exception:
             pass
@@ -408,9 +438,9 @@ class BacktestEngine:
                 self.broker.commission_model = self._commission_model
         except Exception:
             self._commission_model = None
-        
+
         start_time = time.time()
-        
+
         # Prepare an optional market hours filter applied by the broker when executing orders.
         market_hours: Optional[Tuple[str, str]] = None
         if self._ignore_extended_hours:
@@ -422,17 +452,17 @@ class BacktestEngine:
         # Run the backtest
         self._logger.info("Executing backtest")
         results_dict = self._run_backtest(context, timestamp_index, market_hours)
-        
+
         # Calculate execution time
         execution_time = time.time() - start_time
         self._logger.info(f"Backtest completed in {execution_time:.2f} seconds")
-        
+
         # Add execution time to results
-        results_dict['execution_time'] = execution_time
-        
+        results_dict["execution_time"] = execution_time
+
         # Allow strategy to analyze results
         self.strategy.analyze(context, results_dict)
-        
+
         return results_dict
 
     def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
@@ -498,12 +528,16 @@ class BacktestEngine:
             end_date=end,
             symbols=strategy_universe,
             frequencies=sorted(frequency_set),
-            market_hours=(self._market_open_time, self._market_close_time) if self._ignore_extended_hours else None,
+            market_hours=(
+                (self._market_open_time, self._market_close_time)
+                if self._ignore_extended_hours
+                else None
+            ),
         )
 
         # Build and return the timestamp index from the cache.
         return self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
-    
+
     def _run_backtest(
         self,
         context: Context,
@@ -543,28 +577,28 @@ class BacktestEngine:
             if trading_date_series.len() == 0:
                 self._logger.warning("No data available for the specified period")
                 return self._create_empty_results()
-            
+
             unique_dates: List[datetime.date] = trading_date_series.to_list()
             self._logger.info(f"Processing {len(unique_dates)} trading days")
-            
+
             # Process data day by day
             for current_date in unique_dates:
                 # Clear previous pipeline results so strategies see fresh daily outputs.
                 self._pipeline_results = {}
-                
+
                 # Anchor the date for scheduling daily hooks/pipelines.
                 context.current_ts = datetime.combine(current_date, datetime.min.time())
                 self.data_portal.set_current_dt(context.current_ts)
-                
+
                 # Compute any attached pipelines for this day
                 for name, pipeline in self.attached_pipelines.items():
                     try:
                         # Run pipeline for just this date. Many ranking/screening pipelines operate daily.
                         pipeline_result = self.pipeline_engine.run_pipeline(
-                            pipeline, 
+                            pipeline,
                             start_date=context.current_ts,
-                            end_date=context.current_ts
-                            )
+                            end_date=context.current_ts,
+                        )
                         if pipeline_result.height > 0:
                             # Expose results via pipeline_output for the strategy to consume.
                             self._pipeline_results[name] = pipeline_result
@@ -572,14 +606,16 @@ class BacktestEngine:
                                 f"Pipeline '{name}' computed {len(pipeline_result)} results for {current_date}"
                             )
                         else:
-                            self._logger.warning(f"Pipeline '{name}' returned empty results for {current_date}")
+                            self._logger.warning(
+                                f"Pipeline '{name}' returned empty results for {current_date}"
+                            )
                     finally:
                         pass
-                
+
                 # Call before_trading_start at the beginning of each day
-                if hasattr(self.strategy, 'before_trading_start'):                   
+                if hasattr(self.strategy, "before_trading_start"):
                     self.strategy.before_trading_start(context, self.data_portal)
-                
+
                 # Determine the day's timestamp sequence from the unified index.
                 day_timestamp_series = (
                     pl.DataFrame({"timestamp": timestamp_index})
@@ -593,23 +629,27 @@ class BacktestEngine:
                 # Process each timestamp chronologically
                 for timestamp in iter_timestamps:
                     self.data_portal.set_current_dt(timestamp)
-                    
+
                     # Call handle_data for each timestamp to generate trading signals
-                    if hasattr(self.strategy, 'handle_data'):
+                    if hasattr(self.strategy, "handle_data"):
                         signals = self.strategy.handle_data(context, self.data_portal)
-                        
+
                         if signals:
                             for signal in signals:
                                 self.broker.place_order(signal)
 
                     # Derive current execution universe to ensure correct pricing and settlement.
-                    universe = self._discover_universe(signals if 'signals' in locals() else None)
-                    
+                    universe = self._discover_universe(
+                        signals if "signals" in locals() else None
+                    )
+
                     # Execute orders using a snapshot sourced via ``DataPortal`` to ensure single data interface.
                     transactions = []
                     if universe:
                         try:
-                            transactions = self.broker.execute_orders_with_portal(sorted(list(universe)), timestamp, market_hours)
+                            transactions = self.broker.execute_orders_with_portal(
+                                sorted(list(universe)), timestamp, market_hours
+                            )
                         except Exception:
                             transactions = []
 
@@ -627,32 +667,40 @@ class BacktestEngine:
                             ]
                         )
                         # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
-                        self.portfolio.update_from_transactions(timestamp, transactions_pl)
-                    
+                        self.portfolio.update_from_transactions(
+                            timestamp, transactions_pl
+                        )
+
                     # Ensure valuations and stats are computed even if no fills occurred at this timestamp.
                     self.portfolio.update_from_transactions(timestamp, pl.DataFrame())
-                    
+
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close
-                    is_last_timestamp = (timestamp == max(iter_timestamps)) if len(iter_timestamps) > 0 else False
-                    if is_last_timestamp and hasattr(self.strategy, 'on_market_close'):
-                        self.strategy.on_market_close(context, self.data_portal, self.portfolio)
+                    is_last_timestamp = (
+                        (timestamp == max(iter_timestamps))
+                        if len(iter_timestamps) > 0
+                        else False
+                    )
+                    if is_last_timestamp and hasattr(self.strategy, "on_market_close"):
+                        self.strategy.on_market_close(
+                            context, self.data_portal, self.portfolio
+                        )
 
                     context.current_ts = timestamp
-            
+
             # Prepare results
             return {
-                'stats': self.portfolio.get_stats(),
-                'equity_curve': self.portfolio.get_equity_curve(),
-                'transactions': self.portfolio.get_transactions(),
-                'positions': self.portfolio.get_positions(),
-                'success': True
+                "stats": self.portfolio.get_stats(),
+                "equity_curve": self.portfolio.get_equity_curve(),
+                "transactions": self.portfolio.get_transactions(),
+                "positions": self.portfolio.get_positions(),
+                "success": True,
             }
-            
+
         finally:
             # Ensure any temporary state is not leaked between runs.
             self._create_empty_results()
-    
+
     def _create_empty_results(self) -> Dict[str, Any]:
         """Construct an empty results dictionary used as a safe fallback.
 
@@ -665,16 +713,18 @@ class BacktestEngine:
             >>> empty = engine._create_empty_results()
         """
         return {
-            'stats': {
-                'total_return': 0.0,
-                'total_return_pct': 0.0,
-                'num_trades': 0
-            },
-            'equity_curve': pl.DataFrame(schema={'timestamp': pl.Datetime, 'equity': pl.Float64, 'cash': pl.Float64}),
-            'transactions': pl.DataFrame(),
-            'positions': pl.DataFrame(),
-            'execution_time': 0.0,
-            'success': False
+            "stats": {"total_return": 0.0, "total_return_pct": 0.0, "num_trades": 0},
+            "equity_curve": pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime,
+                    "equity": pl.Float64,
+                    "cash": pl.Float64,
+                }
+            ),
+            "transactions": pl.DataFrame(),
+            "positions": pl.DataFrame(),
+            "execution_time": 0.0,
+            "success": False,
         }
 
     def run_live(

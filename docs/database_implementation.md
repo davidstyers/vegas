@@ -95,7 +95,7 @@ Potential future enhancements to the database system:
 2. **Market data analysis**
    - Use SQL to analyze market trends and patterns
    - Create custom datasets for machine learning models
-   
+
 3. **Portfolio optimization**
    - Query historical data for multiple assets
-   - Calculate correlations and other statistical measures 
+   - Calculate correlations and other statistical measures

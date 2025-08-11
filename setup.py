@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Setup script for the Vegas backtesting engine."""
 
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="vegas",
@@ -17,9 +17,9 @@ setup(
         "matplotlib>=3.4.0",
         "zstandard>=0.15.0",  # For zstd compression support
         "quantstats>=0.0.59",  # For performance analytics and tearsheets
-        "duckdb>=0.9.0",      # For efficient data querying
-        "pyarrow>=14.0.0",    # For Parquet support
-        "pytz>=2023.3.0",     # For timezone support
+        "duckdb>=0.9.0",  # For efficient data querying
+        "pyarrow>=14.0.0",  # For Parquet support
+        "pytz>=2023.3.0",  # For timezone support
     ],
     extras_require={
         "ibkr": [
@@ -44,4 +44,4 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
     ],
-) 
+)

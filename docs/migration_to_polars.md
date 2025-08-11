@@ -170,7 +170,7 @@ def handle_data(self, context, data):
             symbol_data = symbol_data.sort_values('timestamp')
             latest_price = symbol_data['close'].iloc[-1]
             latest_sma = symbol_data['sma'].iloc[-1]
-            
+
             if latest_price > latest_sma:
                 # Generate buy signal
 ```
@@ -185,10 +185,10 @@ def handle_data(self, context, data):
             prices = symbol_data.get_column('close')
             sma = prices.rolling_mean(window_size=20)
             symbol_data = symbol_data.with_columns(sma.alias('sma'))
-            
+
             latest_price = prices.last()
             latest_sma = sma.last()
-            
+
             if latest_price > latest_sma:
                 # Generate buy signal
 ```

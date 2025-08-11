@@ -2,7 +2,9 @@
 
 This module defines the core building blocks for computations in the pipeline system.
 """
-from typing import List, Optional, Union, Any
+
+from typing import Any, List, Optional
+
 import polars as pl
 
 
@@ -12,10 +14,13 @@ class Term:
     Terms form the nodes of expression trees compiled by the pipeline engine
     into Polars expressions. Subclasses implement `to_expression`.
     """
-    def __init__(self,
-                 inputs: Optional[List['Term']] = None,
-                 window_length: int = 1,
-                 mask: Optional['Filter'] = None):
+
+    def __init__(
+        self,
+        inputs: Optional[List["Term"]] = None,
+        window_length: int = 1,
+        mask: Optional["Filter"] = None,
+    ):
         """Initialize a `Term` with optional inputs and mask.
 
         :param inputs: Input terms whose values are required to compute this term.
@@ -33,7 +38,7 @@ class Term:
         self.window_length = window_length
         self.mask = mask
         self.name = None
-        
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression computing this term.
 
@@ -46,36 +51,42 @@ class Term:
         :raises NotImplementedError: If the subclass does not implement this method.
         """
         raise NotImplementedError("Term subclasses must implement to_expression")
-    
-    def __lt__(self, other) -> 'Filter':
+
+    def __lt__(self, other: Any) -> "Filter":
         """Binary operator <"""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '<')
 
-    def __le__(self, other) -> 'Filter':
+        return BinaryCompare(self, other, "<")
+
+    def __le__(self, other: Any) -> "Filter":
         """Binary operator <="""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '<=')
 
-    def __eq__(self, other) -> 'Filter':
+        return BinaryCompare(self, other, "<=")
+
+    def __eq__(self, other: Any) -> Any:
         """Binary operator =="""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '==')
 
-    def __ne__(self, other) -> 'Filter':
+        return BinaryCompare(self, other, "==")
+
+    def __ne__(self, other: Any) -> Any:
         """Binary operator !="""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '!=')
 
-    def __gt__(self, other) -> 'Filter':
+        return BinaryCompare(self, other, "!=")
+
+    def __gt__(self, other: Any) -> "Filter":
         """Binary operator >"""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '>')
 
-    def __ge__(self, other) -> 'Filter':
+        return BinaryCompare(self, other, ">")
+
+    def __ge__(self, other: Any) -> "Filter":
         """Binary operator >="""
         from vegas.pipeline.filters import BinaryCompare
-        return BinaryCompare(self, other, '>=')
+
+        return BinaryCompare(self, other, ">=")
 
 
 class Factor(Term):
@@ -86,23 +97,28 @@ class Factor(Term):
     and `bottom` to compose new terms fluently.
     """
 
-    def __add__(self, other) -> 'Factor':
+    def __add__(self, other: Any) -> "Factor":
         """Binary operator +"""
-        return BinaryFactor(self, other, '+')
-        
-    def __sub__(self, other) -> 'Factor':
-        """Binary operator -"""
-        return BinaryFactor(self, other, '-')
-        
-    def __mul__(self, other) -> 'Factor':
-        """Binary operator *"""
-        return BinaryFactor(self, other, '*')
-        
-    def __truediv__(self, other) -> 'Factor':
-        """Binary operator /"""
-        return BinaryFactor(self, other, '/')
+        return BinaryFactor(self, other, "+")
 
-    def rank(self, method='ordinal', ascending=True, mask=None) -> 'Factor':
+    def __sub__(self, other: Any) -> "Factor":
+        """Binary operator -"""
+        return BinaryFactor(self, other, "-")
+
+    def __mul__(self, other: Any) -> "Factor":
+        """Binary operator *"""
+        return BinaryFactor(self, other, "*")
+
+    def __truediv__(self, other: Any) -> "Factor":
+        """Binary operator /"""
+        return BinaryFactor(self, other, "/")
+
+    def rank(
+        self,
+        method: str = "ordinal",
+        ascending: bool = True,
+        mask: Optional["Filter"] = None,
+    ) -> "Factor":
         """Return a factor whose values are the cross-sectional ranks.
 
         :param method: Rank method ('ordinal', 'min', 'max', 'dense', 'average').
@@ -117,13 +133,14 @@ class Factor(Term):
             >>> f.rank(method='dense', ascending=False)
         """
         from vegas.pipeline.factors import Rank
+
         return Rank(self, method=method, ascending=ascending, mask=mask or self.mask)
-    
-    def top(self, N, mask=None) -> 'Filter':
+
+    def top(self, n: int, mask: Optional["Filter"] = None) -> "Filter":
         """Return a filter matching the top-N assets by the factor each day.
 
-        :param N: Number of assets to pass the filter each day.
-        :type N: int
+        :param n: Number of assets to pass the filter each day.
+        :type n: int
         :param mask: Optional mask to restrict the ranking universe.
         :type mask: Optional[Filter]
         :returns: Filter selecting the top N assets.
@@ -133,13 +150,14 @@ class Factor(Term):
         """
         # Use a dedicated TopN filter over the factor directly.
         from vegas.pipeline.filters.advanced import TopN
-        return TopN(self, int(N), ascending=False, mask=mask or self.mask)
-    
-    def bottom(self, N, mask=None) -> 'Filter':
+
+        return TopN(self, int(n), ascending=False, mask=mask or self.mask)
+
+    def bottom(self, n: int, mask: Optional["Filter"] = None) -> "Filter":
         """Return a filter matching the bottom-N assets by the factor each day.
 
-        :param N: Number of assets to pass the filter each day.
-        :type N: int
+        :param n: Number of assets to pass the filter each day.
+        :type n: int
         :param mask: Optional mask to restrict the ranking universe.
         :type mask: Optional[Filter]
         :returns: Filter selecting the bottom N assets.
@@ -148,9 +166,10 @@ class Factor(Term):
             >>> f.bottom(50)
         """
         from vegas.pipeline.filters.advanced import TopN
-        return TopN(self, int(N), ascending=True, mask=mask or self.mask)
-    
-    def zscore(self, mask=None) -> 'Factor':
+
+        return TopN(self, int(n), ascending=True, mask=mask or self.mask)
+
+    def zscore(self, mask: Optional["Filter"] = None) -> "Factor":
         """Return a factor that Z-scores each day's cross-section.
 
         :param mask: Optional mask defining values to include.
@@ -161,13 +180,14 @@ class Factor(Term):
             >>> f.zscore()
         """
         from vegas.pipeline.factors.statistical import ZScore
+
         return ZScore(self, mask=mask or self.mask)
 
 
 class BinaryFactor(Factor):
     """Factor produced by applying a binary operator to two inputs."""
-    
-    def __init__(self, left, right, op):
+
+    def __init__(self, left: Any, right: Any, op: str) -> None:
         """Initialize a `BinaryFactor`.
 
         :param left: Left operand as `Term` or scalar.
@@ -188,7 +208,7 @@ class BinaryFactor(Factor):
             inputs.append(right)
         window_length = max([t.window_length for t in inputs]) if inputs else 1
         super().__init__(inputs=inputs, window_length=window_length)
-        
+
     def to_expression(self) -> pl.Expr:
         """Return the Polars expression applying the operator to inputs.
 
@@ -206,13 +226,13 @@ class BinaryFactor(Factor):
         else:
             right_expr = pl.lit(self.right)
 
-        if self.op == '+':
+        if self.op == "+":
             return left_expr + right_expr
-        elif self.op == '-':
+        elif self.op == "-":
             return left_expr - right_expr
-        elif self.op == '*':
+        elif self.op == "*":
             return left_expr * right_expr
-        elif self.op == '/':
+        elif self.op == "/":
             return left_expr / right_expr
         else:
             raise ValueError(f"Unknown operator: {self.op}")
@@ -220,23 +240,23 @@ class BinaryFactor(Factor):
 
 class Filter(Term):
     """Boolean term used to include/exclude assets based on criteria."""
-    
-    def __and__(self, other) -> 'Filter':
+
+    def __and__(self, other) -> "Filter":
         """Binary operator &"""
-        return BinaryFilter(self, other, '&')
-        
-    def __or__(self, other) -> 'Filter':
+        return BinaryFilter(self, other, "&")
+
+    def __or__(self, other) -> "Filter":
         """Binary operator |"""
-        return BinaryFilter(self, other, '|')
-        
-    def __invert__(self) -> 'Filter':
+        return BinaryFilter(self, other, "|")
+
+    def __invert__(self) -> "Filter":
         """Unary operator ~"""
-        return UnaryFilter(self, '~')
+        return UnaryFilter(self, "~")
 
 
 class BinaryFilter(Filter):
     """Filter combining two inputs with a binary boolean operator."""
-    
+
     def __init__(self, left, right, op):
         """Initialize a `BinaryFilter`.
 
@@ -258,7 +278,7 @@ class BinaryFilter(Filter):
             inputs.append(right)
         window_length = max([t.window_length for t in inputs]) if inputs else 1
         super().__init__(inputs=inputs, window_length=window_length)
-        
+
     def to_expression(self) -> pl.Expr:
         """Return a boolean Polars expression applying the binary operator.
 
@@ -276,9 +296,9 @@ class BinaryFilter(Filter):
         else:
             right_expr = pl.lit(self.right)
 
-        if self.op == '&':
+        if self.op == "&":
             return left_expr & right_expr
-        elif self.op == '|':
+        elif self.op == "|":
             return left_expr | right_expr
         else:
             raise ValueError(f"Unknown operator: {self.op}")
@@ -286,7 +306,7 @@ class BinaryFilter(Filter):
 
 class UnaryFilter(Filter):
     """Filter applying a unary boolean operator to another filter."""
-    
+
     def __init__(self, input_filter, op):
         """Initialize a `UnaryFilter`.
 
@@ -298,8 +318,10 @@ class UnaryFilter(Filter):
         """
         self.input_filter = input_filter
         self.op = op
-        super().__init__(inputs=[input_filter], window_length=input_filter.window_length)
-        
+        super().__init__(
+            inputs=[input_filter], window_length=input_filter.window_length
+        )
+
     def to_expression(self) -> pl.Expr:
         """Return a boolean expression applying the unary operator.
 
@@ -307,7 +329,7 @@ class UnaryFilter(Filter):
         :rtype: pl.Expr
         :raises ValueError: If an unknown operator is supplied.
         """
-        if self.op == '~':
+        if self.op == "~":
             return ~self.input_filter.to_expression()
         else:
             raise ValueError(f"Unknown operator: {self.op}")
@@ -315,5 +337,6 @@ class UnaryFilter(Filter):
 
 class Classifier(Term):
     """Term that groups assets into categories (e.g., sector identifiers)."""
+
     dtype = pl.Int64
     missing_value = -1

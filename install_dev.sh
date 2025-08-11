@@ -26,4 +26,4 @@ echo "Example usage:"
 echo "vegas run examples/simple_ma_strategy.py --data-file data/sample_data.csv.zst --start 2020-01-01 --end 2021-01-01"
 echo
 echo "For help, run:"
-echo "vegas --help" 
+echo "vegas --help"

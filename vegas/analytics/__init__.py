@@ -2,4 +2,4 @@
 
 from vegas.analytics.analytics import Analytics, Results
 
-__all__ = ["Analytics", "Results"] 
+__all__ = ["Analytics", "Results"]

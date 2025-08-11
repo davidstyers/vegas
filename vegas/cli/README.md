@@ -65,7 +65,7 @@ vegas ingest-ohlcv --file path/to/file.ohlcv-1h.csv.zst
 vegas ingest-ohlcv --directory path/to/directory
 ```
 
-> **IMPORTANT**: Always use the `ingest-ohlcv` command for OHLCV files, not the general `ingest` command. 
+> **IMPORTANT**: Always use the `ingest-ohlcv` command for OHLCV files, not the general `ingest` command.
 > The `ingest-ohlcv` command is specifically designed to handle the OHLCV file format with the `ts_event` column.
 
 Options:
@@ -196,4 +196,4 @@ The system supports OHLCV (Open, High, Low, Close, Volume) files in the format:
 - Compressed with Zstandard
 - CSV format with headers: ts_event, symbol, open, high, low, close, volume
 
-Data is automatically partitioned by year, date, and symbol in the Parquet files. 
+Data is automatically partitioned by year, date, and symbol in the Parquet files.
