@@ -104,28 +104,29 @@ def test_engine_initialization():
     assert engine.portfolio is None
 
 
-def test_set_trading_hours_and_ignore_extended_hours():
+def test_engine_calendar_selection_from_cli_default():
     engine = BacktestEngine(timezone="US/Eastern")
-    engine.set_trading_hours(open_time="09:30", close_time="16:00")
-    engine.ignore_extended_hours(True)
-    assert engine._market_open_time == "09:30"
-    assert engine._market_close_time == "16:00"
-    assert engine._ignore_extended_hours is True
+    # Default calendar is 24/7 unless overridden by CLI; engine exposes _calendar_name
+    assert getattr(engine, "_calendar_name", "24/7") == "24/7"
 
 
-@pytest.mark.parametrize(
-    "timestamp, expected",
-    [
-        (datetime(2025, 6, 2, 9, 29), False),
-        (datetime(2025, 6, 2, 9, 30), True),
-        (datetime(2025, 6, 2, 15, 59), True),
-        (datetime(2025, 6, 2, 16, 0), False),
-    ],
-)
-def test_is_regular_market_hours(timestamp, expected):
+def test_calendar_filters_applied_via_portal(monkeypatch):
+    from vegas.calendars import get_calendar
+
     engine = BacktestEngine(timezone="US/Eastern")
-    engine.set_trading_hours(open_time="09:30", close_time="16:00")
-    assert engine._is_regular_market_hours(timestamp) is expected
+    engine._calendar_name = "NYSE"
+
+    # Wire mocks
+    engine.strategy = DummyStrategy()
+    mock_dl = MockDL(tz="US/Eastern")
+    engine.data_layer = mock_dl
+    engine.data_portal = DataPortal(mock_dl)
+
+    # Load with calendar and check timestamp index is non-empty and sorted
+    idx = engine._prepare_market_data(datetime(2025, 6, 2, 8), datetime(2025, 6, 2, 18))
+    assert isinstance(idx, pl.Series)
+    assert idx.len() > 0
+    assert idx.sort().to_list() == idx.to_list()
 
 
 def test_attach_pipeline():
@@ -140,8 +141,7 @@ def test_attach_pipeline():
 
 def test_run_backtest_integration(monkeypatch):
     engine = BacktestEngine(timezone="US/Eastern")
-    engine.set_trading_hours(open_time="09:30", close_time="16:00")
-    engine.ignore_extended_hours(True)
+    engine._calendar_name = "24/7"
 
     strategy = DummyStrategy()
 

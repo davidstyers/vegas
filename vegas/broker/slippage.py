@@ -100,3 +100,21 @@ class VolumeSlippageModel(SlippageModel):
         slippage_factor = 1.0 + (direction * impact)
 
         return float(order_price) * slippage_factor
+
+
+# Zipline-like helper namespace for strategies
+class slippage:
+    """Helper namespace for strategies to construct slippage models.
+
+    Example:
+        >>> context.set_slippage(slippage.Fixed(slippage_pct=0.0005))
+        >>> context.set_slippage(slippage.Volume(volume_impact=0.1))
+    """
+
+    @staticmethod
+    def Fixed(slippage_pct: float = 0.001) -> SlippageModel:
+        return FixedSlippageModel(slippage_pct=slippage_pct)
+
+    @staticmethod
+    def Volume(volume_impact: float = 0.1) -> SlippageModel:
+        return VolumeSlippageModel(volume_impact=volume_impact)

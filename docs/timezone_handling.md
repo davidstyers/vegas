@@ -74,16 +74,14 @@ df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("us", time_zone=self.t
 2. **Use IANA timezone identifiers** (e.g., "America/New_York" instead of "EST")
 3. **Consider your data sources' timezones** when analyzing data and generating signals
 
-## Timezone and Trading Hours
+## Timezone and Calendars
 
-When specifying market hours for regular trading hours filtering, be aware of the timezone context:
+When selecting a calendar, remember it is interpreted in the context of the configured timezone:
 
 ```python
-# New York market hours in Eastern Time
-engine.set_trading_hours(market_name="NYSE", open_time="09:30", close_time="16:00")
+engine = BacktestEngine(timezone="America/New_York")
+engine._calendar_name = "NYSE"   # Calendar uses Eastern trading session semantics
 ```
-
-The trading hours are interpreted in the context of the configured timezone.
 
 ## Testing Timezone Handling
 

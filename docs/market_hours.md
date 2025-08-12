@@ -1,6 +1,6 @@
-# Market Hours Handling in Vegas
+# Calendar-based Market Hours in Vegas
 
-Vegas provides tools to handle both regular and extended market hours during backtesting. This documentation explains how to use these features.
+Vegas uses a unified calendar system to regulate market days and sessions (including holidays). This documentation explains how to use calendars to filter market data during backtesting.
 
 ## Why Market Hours Matter
 
@@ -13,50 +13,38 @@ Different markets operate on different schedules, and many markets have extended
 
 ## Configuration Options
 
-### Setting Trading Hours
+### Selecting a Calendar
 
-You can configure what Vegas considers "regular market hours" for your backtest:
-
-```python
-# In Python code
-engine = BacktestEngine(timezone="US/Eastern")
-engine.set_trading_hours("NASDAQ", open="09:30", close="16:00")
-```
-
-### Filtering Extended Hours Data
-
-You can choose to include or exclude extended hours data in your backtest:
+Choose a trading calendar by name. Built-ins include `"NYSE"` (weekdays 09:30–16:00, no holidays modeled yet) and `"24/7"` (no filtering):
 
 ```python
-# To ignore pre-market and after-hours data
-engine.ignore_extended_hours(True)
+from vegas.engine import BacktestEngine
 
-# To include all data (default behavior)
-engine.ignore_extended_hours(False)
+engine = BacktestEngine()
+engine.set_calendar("NYSE")  # engine timezone follows the calendar
 ```
+
+The engine passes the selected calendar to the data portal which filters timestamps accordingly.
 
 ## Using from the Command Line
 
-The CLI provides options to configure market hours:
+The CLI provides an option to select the calendar:
 
 ```bash
-# Run backtest with only regular market hours data
-vegas run strategy.py --regular-hours-only
+# Run backtest with NYSE calendar
+vegas run strategy.py --calendar NYSE
 
-# Customize market hours
-vegas run strategy.py --market NYSE --market-open 09:30 --market-close 16:00
-
-# Run with extended hours included (default)
-vegas run strategy.py
+# Run with 24/7 calendar (default)
+vegas run strategy.py --calendar "24/7"
 ```
 
 ## How It Works
 
-When regular hours filtering is enabled:
+When a calendar is selected:
 
-1. Data points outside regular market hours are filtered out
-2. The `before_trading_start` strategy callback uses the first data point from regular market hours
-3. Portfolio values are only updated using data from regular market hours
+1. Data points outside the calendar session are filtered out
+2. The `before_trading_start` strategy callback is invoked per trading day
+3. Portfolio values are updated using calendar-valid data points
 
 ## Common Market Hours
 
@@ -71,10 +59,10 @@ When regular hours filtering is enabled:
 
 ## Best Practices
 
-1. **Timezone consistency** - Ensure your market hours configuration matches your data timezone
-2. **Date handling** - Remember that filtering extended hours may result in missing days if you only have extended hours data for some dates
-3. **Testing both** - Consider running backtests both with and without extended hours to understand their impact on your strategy
-4. **Understand your data** - Make sure your dataset properly marks or timestamps extended hours sessions
+1. **Timezone consistency** - Ensure your calendar choice matches your data timezone
+2. **Holiday coverage** - Extend calendars with holiday lists for production usage
+3. **Compare calendars** - Try `"NYSE"` vs `"24/7"` to understand session impacts
+4. **Understand your data** - Ensure timestamps reflect local session times
 
 ## Example Strategy
 
@@ -85,14 +73,12 @@ class RegularHoursStrategy(Strategy):
         context.symbols = ["AAPL", "MSFT", "GOOG"]
 
     def before_trading_start(self, context, data):
-        # This will be called at the start of regular trading hours
-        # (e.g., 9:30 AM for US markets)
-        self.log.info(f"Market open: {data['timestamp'].iloc[0]}")
-
-    def handle_data(self, context, data):
-        # This will only be called for data points during regular hours
-        # if ignore_extended_hours is enabled
+        # Called once per trading day according to the calendar
         pass
+
+    def handle_data(self, context, data_portal):
+        # Called for calendar-valid timestamps only
+        return []
 ```
 
 ## Debugging Tips

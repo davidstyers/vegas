@@ -12,11 +12,11 @@ from .base import TradingCalendar
 class NYSECalendar(TradingCalendar):
     """NYSE-like calendar: Mon–Fri, 09:30–16:00 US/Eastern (no holidays).
 
-    Note: Holidays are not modeled. For production, extend with an observed
+    Note: Holidays are not modeled due to data driven approach. For production, extend with an observed
     holiday list and early-closes if required by your use case.
     """
-
     name: str = "NYSE"
+    timezone: str = "US/Eastern"
 
     def is_trading_time(
         self, dt: datetime

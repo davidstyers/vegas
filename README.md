@@ -153,30 +153,22 @@ Supported timezones include:
 - `Australia/Sydney`
 - And [many others](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
 
-### Market Hours Handling
+### Calendar-based Market Hours and Timezone
 
-Vegas lets you control how regular and extended market hours are handled:
+Vegas uses calendars to filter valid trading sessions:
 
 ```python
-# Set specific market hours
-engine = BacktestEngine(timezone="US/Eastern")
-engine.set_trading_hours("NASDAQ", open="09:30", close="16:00")
-
-# Exclude extended hours data (pre-market and after-hours)
-engine.ignore_extended_hours(True)
+engine = BacktestEngine()
+engine.set_calendar("NYSE")  # engine timezone will follow the calendar
 ```
 
 Using the CLI:
 
 ```bash
-# Run with only regular market hours
-vegas run my_strategy.py --regular-hours-only
-
-# Customize market hours
-vegas run my_strategy.py --market NYSE --market-open 09:30 --market-close 16:00
+vegas run my_strategy.py --calendar NYSE
 ```
 
-See [Market Hours Documentation](docs/market_hours.md) for more details.
+See [Calendar/Market Hours Documentation](docs/market_hours.md) for more details.
 
 ## License
 

@@ -11,11 +11,14 @@ class TradingCalendar:
     """Resolution-agnostic trading calendar for timestamp filtering.
 
     Subclasses implement `is_trading_time(dt)` and may override
-    `filter_timestamps(series)` for vectorized performance. Calendars operate
-    on timezone-aware Python datetimes and Polars Series.
+    `filter_timestamps(series)` for vectorized performance.
+
+    Each calendar declares a `timezone` string (IANA identifier) describing
+    the local market timezone used for timestamp normalization.
     """
 
     name: str
+    timezone: str
 
     def is_trading_time(self, dt: datetime) -> bool:  # pragma: no cover - base fallback
         return True
@@ -38,9 +41,13 @@ class TradingCalendar:
 
 @dataclass
 class TwentyFourSevenCalendar(TradingCalendar):
-    """Pass-through calendar for 24/7 markets (e.g., crypto)."""
+    """Pass-through calendar for 24/7 markets (e.g., crypto).
+
+    Uses UTC as the canonical timezone.
+    """
 
     name: str = "24/7"
+    timezone: str = "UTC"
 
     def is_trading_time(self, dt: datetime) -> bool:
         return True
