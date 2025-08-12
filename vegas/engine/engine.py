@@ -110,6 +110,12 @@ class BacktestEngine:
         # Default calendar is 24/7 (no filtering).
         self._calendar_name: str = "24/7"
 
+        # Pipeline scheduling engine: pipelines are computed once per day to
+        # support ranking/screening workflows aligned to the research cadence.
+        self.pipeline_engine = PipelineEngine(self.data_portal)
+        self.attached_pipelines: Dict[str, Any] = {}
+        self._pipeline_results: Dict[str, pl.DataFrame] = {}
+
     def set_calendar(self, name: str) -> None:
         """Select the trading calendar used to filter market data.
 
@@ -124,12 +130,6 @@ class BacktestEngine:
         # Validate early and store name; actual instance is resolved at load time
         get_calendar(name)
         self._calendar_name = name
-
-        # Pipeline scheduling engine: pipelines are computed once per day to
-        # support ranking/screening workflows aligned to the research cadence.
-        self.pipeline_engine = PipelineEngine(self.data_portal)
-        self.attached_pipelines: Dict[str, Any] = {}
-        self._pipeline_results: Dict[str, pl.DataFrame] = {}
 
     # Legacy market-hours helpers removed in favor of calendar-based filtering.
 
