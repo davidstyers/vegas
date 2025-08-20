@@ -75,7 +75,7 @@ def evaluate_strategy_params(
             initial_capital=config.initial_capital,
         )
         
-        stats = results.get("stats", {}) if isinstance(results, dict) else {}
+        stats = results.stats
         
         # Extract the objective metric
         if config.objective_metric == "sharpe_ratio":
@@ -273,7 +273,7 @@ def run_optimized_backtest(
     end_date: datetime,
     config: OptimizationConfig,
     param_suggestions: Optional[Dict[str, Callable]] = None,
-) -> Dict[str, Any]:
+) -> Strategy:
     """Run a backtest with optional hyperparameter optimization.
     
     Args:
@@ -304,15 +304,8 @@ def run_optimized_backtest(
     
     # Run final evaluation with best parameters
     strategy = strategy_factory(**best_params)
-    engine = BacktestEngine()
-    results = engine.run(
-        start=start_date,
-        end=end_date,
-        strategy=strategy,
-        initial_capital=config.initial_capital,
-    )
     
-    return results
+    return strategy
 
 
 def print_optimization_summary(
