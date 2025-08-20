@@ -42,6 +42,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import polars as pl
 
+from vegas.analytics import Results
+from vegas.analytics.results_helper import create_results_from_dict
 from vegas.broker import Broker
 from vegas.data import DataLayer, DataPortal
 from vegas.pipeline.engine import PipelineEngine
@@ -332,7 +334,7 @@ class BacktestEngine:
         end: datetime,
         strategy: Strategy,
         initial_capital: float = 100_000.0,
-    ) -> Dict[str, Any]:
+    ) -> Results:
         """Run a historical backtest between ``start`` and ``end``.
 
         The engine wires the provided ``strategy`` to a ``Portfolio`` and
@@ -349,8 +351,8 @@ class BacktestEngine:
         :type strategy: Strategy
         :param initial_capital: Initial cash balance used to seed the portfolio and broker.
         :type initial_capital: float
-        :returns: A dictionary containing stats, equity curve, transactions, positions, and success flag.
-        :rtype: dict
+        :returns: A Results object containing stats, equity curve, transactions, positions, and success flag.
+        :rtype: Results
         :raises Exception: Propagates exceptions thrown by user strategy code or I/O layers.
         :Example:
             >>> results = engine.run(start, end, my_strategy, initial_capital=50_000)
@@ -421,10 +423,13 @@ class BacktestEngine:
         # Add execution time to results
         results_dict["execution_time"] = execution_time
 
+        # Create Results object from the dictionary
+        results = create_results_from_dict(results_dict)
+
         # Allow strategy to analyze results
         self.strategy.analyze(context, results_dict)
 
-        return results_dict
+        return results
 
     def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
         """Load and prepare data; return the unified timestamp index.
@@ -621,7 +626,9 @@ class BacktestEngine:
                         except Exception:
                             transactions = []
 
-                    # Update portfolio with transactions
+                    # Update portfolio with transactions or an empty DataFrame if no transactions
+                    # This ensures valuations and stats are computed once per timestamp
+                    transactions_pl = pl.DataFrame()
                     if transactions:
                         transactions_pl = pl.from_records(
                             [
@@ -634,13 +641,8 @@ class BacktestEngine:
                                 for t in transactions
                             ]
                         )
-                        # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
-                        self.portfolio.update_from_transactions(
-                            timestamp, transactions_pl
-                        )
-
-                    # Ensure valuations and stats are computed even if no fills occurred at this timestamp.
-                    self.portfolio.update_from_transactions(timestamp, pl.DataFrame())
+                    # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
+                    self.portfolio.update_from_transactions(timestamp, transactions_pl)
 
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close

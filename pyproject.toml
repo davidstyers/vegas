@@ -37,6 +37,7 @@ ruff = "^0.12.8"
 black = "^25.1.0"
 isort = "^6.0.1"
 mypy = "^1.17.1"
+optuna = "^4.4.0"
 
 [tool.poetry.scripts]
 vegas = "vegas.main:main"

@@ -5,14 +5,13 @@ A focused Python backtesting framework for event-driven trading strategies. Vega
 
 ## Features
 
-- **Event-Driven Architecture**: Sequential processing of market events for realistic simulation
-- **High-Performance Data Processing**: Uses Polars for lightning-fast dataframe operations
-- **Simple, Clean Design**: Focused codebase optimized for readability and extensibility
-- **Comprehensive Analytics**: Performance metrics and visualization
-- **DuckDB and Parquet**: Efficient data storage and querying
-- **CLI Interface**: Easy to run backtests from the command line
-- **Timezone Support**: Configure and normalize timestamps for international markets
-- **Market Hours Handling**: Control regular vs. extended hours for accurate testing
+- **Event-driven backtesting engine** with support for custom strategies
+- **Portfolio management** with position tracking, cash management, and margin requirements
+- **Data portal** for accessing historical market data
+- **Transaction processing** with commission handling
+- **Performance analytics** using quantstats for comprehensive risk and return metrics
+- **Polars integration** for fast data processing
+- **Extensible architecture** for custom data sources and brokers
 
 ## Installation
 
@@ -107,7 +106,13 @@ Strategies respond to market events through callback methods:
 - `analyze`: Analyze backtest results
 
 ### 3. Portfolio
-The `Portfolio` class tracks positions, cash, and performance metrics.
+The `Portfolio` class tracks positions, cash, and performance metrics. It uses quantstats for comprehensive risk and return analytics, including:
+
+- **Core Metrics**: Sharpe ratio, annual returns, maximum drawdown
+- **Risk Metrics**: Value at Risk (VaR), Conditional VaR (CVaR), volatility
+- **Advanced Ratios**: Sortino ratio, Calmar ratio, information ratio
+- **Trade Analysis**: Win rate, profit factor, expectancy, best/worst days
+- **Distribution Analysis**: Skewness, kurtosis, tail ratios
 
 ### 4. Data Layer
 The `DataLayer` provides efficient access to market data using DuckDB and Parquet files.

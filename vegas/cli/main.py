@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 from tabulate import tabulate
 
+from vegas.analytics import generate_quantstats_report
 from vegas.calendars import get_calendar
 from vegas.data import DataLayer
 from vegas.engine import BacktestEngine
@@ -504,7 +505,7 @@ class VegasCLI:
                         for _, row in sources.iterrows():
                             added = (
                                 row["added_date"].strftime("%Y-%m-%d %H:%M:%S")
-                                if pd.notna(row["added_date"])
+                                if pl.not_null(row["added_date"])
                                 else "Unknown"
                             )
                             print(
@@ -518,8 +519,18 @@ class VegasCLI:
             self.logger.error("Database status check failed: %s", e)
             return 1
 
-    def _print_results(self, results: dict, strategy_name: str) -> None:
-        rows = [[k, v] for k, v in results["stats"].items()]
+    def _print_results(self, results, strategy_name: str) -> None:
+        # Handle both Results objects and dictionaries for backward compatibility
+        if hasattr(results, 'stats'):
+            # Results object
+            stats = results.stats
+            execution_time = results.execution_time
+        else:
+            # Dictionary (backward compatibility)
+            stats = results["stats"]
+            execution_time = results["execution_time"]
+            
+        rows = [[k, v] for k, v in stats.items()]
         self.logger.info(
             "\n\n%s Backtest Results:\n%s\n\nExecution Time: %.2f seconds",
             strategy_name,
@@ -530,7 +541,7 @@ class VegasCLI:
                 colalign=("center", "right"),
                 floatfmt=",.2f",
             ),
-            results["execution_time"],
+            execution_time,
         )
 
     def _dump_positions(self, engine: BacktestEngine, args: argparse.Namespace) -> None:
@@ -585,9 +596,16 @@ class VegasCLI:
             except Exception as e:
                 self.logger.error("Failed to write positions ledger CSV: %s", e)
     
-    def _generate_outputs(self, results: dict, strategy_name: str, args: argparse.Namespace) -> None:
-        equity_curve = results["equity_curve"]
-        has_data = hasattr(equity_curve, "empty") and not equity_curve.empty
+    def _generate_outputs(self, results, strategy_name: str, args: argparse.Namespace) -> None:
+        # Handle both Results objects and dictionaries for backward compatibility
+        if hasattr(results, 'equity_curve'):
+            # Results object
+            equity_curve = results.equity_curve
+        else:
+            # Dictionary (backward compatibility)
+            equity_curve = results["equity_curve"]
+            
+        has_data = hasattr(equity_curve, "is_empty") and not equity_curve.is_empty
         if args.output and has_data:
             plt.figure(figsize=(12, 6))
             plt.plot(equity_curve["timestamp"], equity_curve["equity"])
@@ -598,7 +616,7 @@ class VegasCLI:
             plt.savefig(args.output)
             self.logger.info("Equity curve saved to %s", args.output)
         if args.results_csv and has_data:
-            equity_curve.to_csv(args.results_csv, index=False)
+            equity_curve.write_csv(args.results_csv)
             self.logger.info("Results saved to %s", args.results_csv)
         if getattr(args, "report", None):
             self._generate_quantstats_report(
@@ -606,89 +624,37 @@ class VegasCLI:
             )
 
     def _generate_quantstats_report(
-        self, results: dict, strategy_name: str, report_path: str, benchmark: str | None
+        self, results, strategy_name: str, report_path: str, benchmark: str | None
     ) -> None:
+        """Generate QuantStats report using the Results object's create_tearsheet method."""
         try:
-            import pandas as pd
-            import quantstats as qs
-            equity_curve = results["equity_curve"]
-            returns_df = self._prepare_returns_for_quantstats(equity_curve)
-            pd_returns = returns_df.with_columns(pl.col("date").cast(pl.Datetime)).to_pandas()
-            pd_returns["date"] = pd.to_datetime(pd_returns["date"])  # ensure pandas datetime
-            pd_returns = pd_returns.set_index("date")["daily_return_pct"]
-
-            benchmark_symbol = benchmark or "SPY"
-            self.logger.info(
-                "Generating QuantStats report with benchmark %s...",
-                benchmark_symbol,
-            )
-            os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
-            try:
-                qs.reports.html(
-                    pd_returns,
-                    benchmark=benchmark_symbol,
-                    output=report_path,
+            # Handle both Results objects and dictionaries for backward compatibility
+            if hasattr(results, 'create_tearsheet'):
+                # Results object - use its built-in method
+                results.create_tearsheet(
                     title=f"{strategy_name} Performance Report",
+                    benchmark_symbol=benchmark,
+                    output_file=report_path,
+                    output_format="html"
                 )
-                if os.path.exists(report_path):
-                    self.logger.info("QuantStats report saved to %s", report_path)
+                self.logger.info("QuantStats report generation complete")
+            else:
+                # Dictionary (backward compatibility) - use the function
+                success = generate_quantstats_report(
+                    results=results,
+                    strategy_name=strategy_name,
+                    report_path=report_path,
+                    benchmark=benchmark,
+                    logger=self.logger,
+                )
+                if success:
+                    self.logger.info("QuantStats report generation complete")
                 else:
-                    self.logger.error("Failed to create report at %s", report_path)
-            except Exception as e:
-                self.logger.warning(
-                    "Error with standard report: %s. Trying a basic report...",
-                    e,
-                )
-                try:
-                    qs.reports.basic(
-                        pd_returns,
-                        output=report_path,
-                        title=f"{strategy_name} Basic Performance Report",
-                    )
-                    if os.path.exists(report_path):
-                        self.logger.info("Basic QuantStats report saved to %s", report_path)
-                    else:
-                        self.logger.error("Failed to create basic report at %s", report_path)
-                except Exception as e2:
-                    self.logger.error("Error generating basic report: %s", e2)
-        except ImportError:
-            self.logger.error("QuantStats not installed. Install with: pip install quantstats")
-        finally:
-            self.logger.info("QuantStats report generation complete")
+                    self.logger.error("QuantStats report generation failed")
+        except Exception as e:
+            self.logger.error(f"Error generating QuantStats report: {e}")
 
-    def _prepare_returns_for_quantstats(self, returns: pl.DataFrame) -> pl.DataFrame:
-        if getattr(returns, "height", 0) <= 1:
-            return returns
-        if not isinstance(returns, pl.DataFrame):
-            self.logger.error(
-                "Expected returns to be a Polars DataFrame with 'timestamp' and 'equity' columns"
-            )
-            return returns
-        returns = returns.sort("timestamp")
-        timestamps = returns["timestamp"]
-        has_duplicates = timestamps.is_duplicated().any()
-        time_diffs = timestamps.diff().drop_nulls()
-        min_diff = time_diffs.min()
-        one_day_ns = 24 * 60 * 60 * 1_000_000_000
-        if has_duplicates or (min_diff is not None and min_diff < one_day_ns):
-            self.logger.info("Resampling intraday data to daily returns")
-            daily_returns = (
-                returns.with_columns(pl.col("timestamp").dt.date().alias("date"))
-                .group_by("date")
-                .last()
-                .sort("date")
-                .with_columns(
-                    [
-                        pl.col("equity").diff().alias("daily_return_dollars"),
-                        pl.col("equity").pct_change().alias("daily_return_pct"),
-                    ]
-                )
-                .select(["timestamp", "equity", "cash", "daily_return_dollars", "daily_return_pct", "date"])
-            )
-            daily_returns = daily_returns.filter(pl.col("daily_return_pct").is_not_null())
-            if daily_returns.height > 1:
-                return daily_returns.select(["date", "daily_return_pct"])
-        return returns
+
 
 def main():
     """CLI entry point delegating to the object-oriented CLI class."""

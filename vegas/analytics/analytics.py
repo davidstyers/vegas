@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import polars as pl
 
 # Import quantstats for performance analytics
 try:
@@ -38,12 +39,12 @@ class Results:
 
     """
 
-    equity_curve: pd.DataFrame
+    equity_curve: pl.DataFrame
     trades: List[Any]
     stats: Dict[str, Any]
     positions_history: Dict[datetime, Dict[str, Dict[str, float]]]
-    returns: pd.DataFrame
-    benchmark_data: Optional[pd.DataFrame] = None
+    returns: pl.DataFrame
+    benchmark_data: Optional[pl.DataFrame] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert results to a dictionary for serialization.
@@ -53,14 +54,14 @@ class Results:
 
         """
         result = {
-            "equity_curve": self.equity_curve.to_dict("records"),
+            "equity_curve": self.equity_curve.to_dicts(),
             "trades": self.trades,
             "stats": self.stats,
-            "returns": self.returns.to_dict("records"),
+            "returns": self.returns.to_dicts(),
         }
 
         if self.benchmark_data is not None:
-            result["benchmark_data"] = self.benchmark_data.to_dict("records")
+            result["benchmark_data"] = self.benchmark_data.to_dicts()
 
         return result
 
@@ -87,13 +88,15 @@ class Results:
             logging.error("QuantStats not installed. Cannot create tearsheet.")
             return
 
-        # Prepare returns series
-        returns_series = self.returns.set_index("timestamp")["return"]
+        # Prepare returns series - convert polars DataFrame to pandas Series for QuantStats
+        returns_pd = self.returns.to_pandas()
+        returns_series = returns_pd.set_index("timestamp")["return"]
 
         # Prepare benchmark returns if available
         benchmark_returns = None
         if self.benchmark_data is not None and "return" in self.benchmark_data.columns:
-            benchmark_returns = self.benchmark_data.set_index("timestamp")["return"]
+            benchmark_pd = self.benchmark_data.to_pandas()
+            benchmark_returns = benchmark_pd.set_index("timestamp")["return"]
         elif benchmark_symbol:
             # User can specify a benchmark symbol to use instead
             logging.info(f"Using {benchmark_symbol} as benchmark")
@@ -164,8 +167,9 @@ class Results:
             logging.error("QuantStats not installed. Cannot plot returns.")
             return
 
-        # Prepare returns series
-        returns_series = self.returns.set_index("timestamp")["return"]
+        # Prepare returns series - convert polars DataFrame to pandas Series for QuantStats
+        returns_pd = self.returns.to_pandas()
+        returns_series = returns_pd.set_index("timestamp")["return"]
 
         # Plot returns
         qs.plots.returns(returns_series, benchmark=benchmark_symbol, show=show)
@@ -181,8 +185,9 @@ class Results:
             logging.error("QuantStats not installed. Cannot plot drawdown.")
             return
 
-        # Prepare returns series
-        returns_series = self.returns.set_index("timestamp")["return"]
+        # Prepare returns series - convert polars DataFrame to pandas Series for QuantStats
+        returns_pd = self.returns.to_pandas()
+        returns_series = returns_pd.set_index("timestamp")["return"]
 
         # Plot drawdown
         qs.plots.drawdown(returns_series, show=show)
@@ -198,8 +203,9 @@ class Results:
             logging.error("QuantStats not installed. Cannot plot monthly returns.")
             return
 
-        # Prepare returns series
-        returns_series = self.returns.set_index("timestamp")["return"]
+        # Prepare returns series - convert polars DataFrame to pandas Series for QuantStats
+        returns_pd = self.returns.to_pandas()
+        returns_series = returns_pd.set_index("timestamp")["return"]
 
         # Plot monthly returns
         qs.plots.monthly_returns(returns_series, show=show)
@@ -217,12 +223,12 @@ class Results:
         """
         if format_type.lower() == "csv":
             # Export equity curve and returns
-            self.equity_curve.to_csv(f"{file_path}_equity.csv", index=False)
-            self.returns.to_csv(f"{file_path}_returns.csv", index=False)
+            self.equity_curve.write_csv(f"{file_path}_equity.csv")
+            self.returns.write_csv(f"{file_path}_returns.csv")
 
             # Export statistics as CSV
-            stats_df = pd.DataFrame([self.stats])
-            stats_df.to_csv(f"{file_path}_stats.csv", index=False)
+            stats_df = pl.DataFrame([self.stats])
+            stats_df.write_csv(f"{file_path}_stats.csv")
 
         elif format_type.lower() == "json":
             # Export all results as JSON
@@ -292,8 +298,10 @@ class Analytics:
             win_rate = 0.0
 
         # Prepare returns series for QuantStats
-        if not returns.empty and HAS_QS:
-            returns_series = returns.set_index("timestamp")["return"]
+        if not returns.is_empty() and HAS_QS:
+            # Convert polars DataFrame to pandas Series for QuantStats
+            returns_pd = returns.to_pandas()
+            returns_series = returns_pd.set_index("timestamp")["return"]
 
             # Calculate key metrics using QuantStats
             stats = {
@@ -376,8 +384,10 @@ class Analytics:
             }
 
         # Add benchmark comparison if available
-        if benchmark_data is not None and HAS_QS and not returns.empty:
-            benchmark_returns = benchmark_data.set_index("timestamp")["return"]
+        if benchmark_data is not None and HAS_QS and not returns.is_empty():
+            # Convert polars DataFrame to pandas Series for QuantStats
+            benchmark_pd = benchmark_data.to_pandas()
+            benchmark_returns = benchmark_pd.set_index("timestamp")["return"]
 
             try:
                 stats.update(
@@ -421,6 +431,16 @@ class Analytics:
         equity_curve = portfolio.get_equity_curve()
         returns = portfolio.get_returns()
         positions_history = portfolio.get_positions_history()
+
+        # Ensure all dataframes are polars DataFrames
+        if not isinstance(equity_curve, pl.DataFrame):
+            equity_curve = pl.from_pandas(equity_curve)
+            
+        if not isinstance(returns, pl.DataFrame):
+            returns = pl.from_pandas(returns)
+            
+        if benchmark_data is not None and not isinstance(benchmark_data, pl.DataFrame):
+            benchmark_data = pl.from_pandas(benchmark_data)
 
         return Results(
             equity_curve=equity_curve,
