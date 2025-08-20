@@ -7,6 +7,7 @@ from datetime import datetime
 import polars as pl
 
 from vegas.engine import BacktestEngine
+from vegas.calendars import get_calendar
 
 # Configure trading hours
 MARKET_OPEN = "09:30"
@@ -17,14 +18,14 @@ def test_database_filtering():
     """Test the database-level filtering of regular trading hours."""
     # Create engine with regular hours filtering
     engine = BacktestEngine()
-    engine.set_trading_hours("US", MARKET_OPEN, MARKET_CLOSE)
+    engine._calendar_name = "NYSE"
 
     # First test without filtering
     print("Testing without RTH filtering...")
     start_time = time.time()
 
-    # Get market data without filtering
-    engine.ignore_extended_hours(False)
+    # Get market data without calendar filtering (24/7)
+    engine._calendar_name = "24/7"
     all_data = engine.data_layer.get_data_for_backtest(
         start=datetime(2022, 1, 1), end=datetime(2022, 1, 31)
     )
@@ -50,13 +51,12 @@ def test_database_filtering():
         print("\n\nTesting with RTH filtering at database level...")
         start_time = time.time()
 
-        # Enable filtering
-        engine.ignore_extended_hours(True)
-
-        # Get filtered data
+        # Enable filtering by using NYSE calendar
+        cal = get_calendar("NYSE")
         filtered_data = engine.data_layer.get_data_for_backtest(
             start=datetime(2022, 1, 1),
             end=datetime(2022, 1, 31),
+            # Note: Direct DB path does not know calendars; emulate by minutes for this example
             market_hours=(MARKET_OPEN, MARKET_CLOSE),
         )
 

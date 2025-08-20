@@ -57,4 +57,11 @@ results = engine.run(
 
 # Analyze results
 engine.get_results().plot_equity_curve()
-```
+
+# Generate QuantStats report
+results.create_tearsheet(
+    title="My Strategy Performance Report",
+    benchmark_symbol="SPY",
+    output_file="reports/my_strategy.html",
+    output_format="html"
+)

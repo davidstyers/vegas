@@ -479,7 +479,9 @@ class Portfolio:
         return history
 
     def get_stats(self):
-        """Calculate basic performance statistics."""
+        """Calculate performance statistics using quantstats."""
+        import quantstats as qs
+        
         stats: Dict[str, Any] = {}
         stats["initial_capital"] = self.initial_capital
         stats["final_value"] = self.current_equity
@@ -497,32 +499,44 @@ class Portfolio:
         equity_df = self.get_equity_curve()
         returns_df = self.get_returns()
 
-        if len(equity_df) > 1:
-            equity_df = equity_df.with_columns(
-                pl.col("equity").cum_max().alias("previous_peak")
-            ).with_columns(
-                (
-                    (pl.col("equity") - pl.col("previous_peak"))
-                    / pl.col("previous_peak")
-                    * 100
-                ).alias("drawdown")
-            )
-            max_drawdown = equity_df.select(pl.col("drawdown").min()).item()
-            stats["max_drawdown_pct"] = abs(max_drawdown)
-
-            if returns_df.height > 1:
-                daily_returns = returns_df["return"]
-                mean_return = daily_returns.mean()
-                std_return = daily_returns.std()
-                if std_return and std_return > 0:
-                    stats["sharpe_ratio"] = (mean_return / std_return) * (252**0.5)
-                    stats["annual_return_pct"] = ((1 + mean_return) ** 252 - 1) * 100
-                else:
-                    stats["sharpe_ratio"] = 0.0
-                    stats["annual_return_pct"] = 0.0
-            else:
-                stats["sharpe_ratio"] = 0.0
-                stats["annual_return_pct"] = 0.0
+        if len(equity_df) > 1 and returns_df.height > 1:
+            # Convert returns to pandas Series for quantstats
+            returns_series = returns_df.to_pandas().set_index("timestamp")["return"]
+            
+            # Core statistics using quantstats (maintaining original interface)
+            stats["sharpe_ratio"] = qs.stats.sharpe(returns_series)
+            stats["annual_return_pct"] = qs.stats.cagr(returns_series) * 100
+            stats["max_drawdown_pct"] = abs(qs.stats.max_drawdown(returns_series)) * 100
+            
+            # Additional useful statistics
+            stats["volatility_pct"] = qs.stats.volatility(returns_series) * 100
+            stats["sortino_ratio"] = qs.stats.sortino(returns_series)
+            stats["calmar_ratio"] = qs.stats.calmar(returns_series)
+            stats["var_95"] = qs.stats.var(returns_series, 0.05) * 100
+            stats["cvar_95"] = qs.stats.cvar(returns_series, 0.05) * 100
+            stats["win_rate"] = qs.stats.win_rate(returns_series) * 100
+            stats["profit_factor"] = qs.stats.profit_factor(returns_series)
+            stats["best_day"] = qs.stats.best(returns_series) * 100
+            stats["worst_day"] = qs.stats.worst(returns_series) * 100
+            stats["skewness"] = qs.stats.skew(returns_series)
+            stats["kurtosis"] = qs.stats.kurtosis(returns_series)
+        else:
+            # Fallback to basic stats if insufficient data
+            stats["sharpe_ratio"] = 0.0
+            stats["annual_return_pct"] = 0.0
+            stats["max_drawdown_pct"] = 0.0
+            stats["volatility_pct"] = 0.0
+            stats["sortino_ratio"] = 0.0
+            stats["calmar_ratio"] = 0.0
+            stats["var_95"] = 0.0
+            stats["cvar_95"] = 0.0
+            stats["win_rate"] = 0.0
+            stats["profit_factor"] = 0.0
+            stats["expectancy"] = 0.0
+            stats["best_day"] = 0.0
+            stats["worst_day"] = 0.0
+            stats["skewness"] = 0.0
+            stats["kurtosis"] = 0.0
 
         return stats
 

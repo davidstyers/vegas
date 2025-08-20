@@ -22,7 +22,7 @@ if NYSECalendar is not None:
 _CALENDAR_REGISTRY.update(
     {
         "24/7": TwentyFourSevenCalendar(),
-        "24/7_CRYPTO": TwentyFourSevenCalendar(name="24/7_CRYPTO"),
+        "24/7_CRYPTO": TwentyFourSevenCalendar(name="24/7_CRYPTO", timezone="UTC"),
     }
 )
 

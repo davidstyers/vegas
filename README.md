@@ -5,14 +5,13 @@ A focused Python backtesting framework for event-driven trading strategies. Vega
 
 ## Features
 
-- **Event-Driven Architecture**: Sequential processing of market events for realistic simulation
-- **High-Performance Data Processing**: Uses Polars for lightning-fast dataframe operations
-- **Simple, Clean Design**: Focused codebase optimized for readability and extensibility
-- **Comprehensive Analytics**: Performance metrics and visualization
-- **DuckDB and Parquet**: Efficient data storage and querying
-- **CLI Interface**: Easy to run backtests from the command line
-- **Timezone Support**: Configure and normalize timestamps for international markets
-- **Market Hours Handling**: Control regular vs. extended hours for accurate testing
+- **Event-driven backtesting engine** with support for custom strategies
+- **Portfolio management** with position tracking, cash management, and margin requirements
+- **Data portal** for accessing historical market data
+- **Transaction processing** with commission handling
+- **Performance analytics** using quantstats for comprehensive risk and return metrics
+- **Polars integration** for fast data processing
+- **Extensible architecture** for custom data sources and brokers
 
 ## Installation
 
@@ -107,7 +106,13 @@ Strategies respond to market events through callback methods:
 - `analyze`: Analyze backtest results
 
 ### 3. Portfolio
-The `Portfolio` class tracks positions, cash, and performance metrics.
+The `Portfolio` class tracks positions, cash, and performance metrics. It uses quantstats for comprehensive risk and return analytics, including:
+
+- **Core Metrics**: Sharpe ratio, annual returns, maximum drawdown
+- **Risk Metrics**: Value at Risk (VaR), Conditional VaR (CVaR), volatility
+- **Advanced Ratios**: Sortino ratio, Calmar ratio, information ratio
+- **Trade Analysis**: Win rate, profit factor, expectancy, best/worst days
+- **Distribution Analysis**: Skewness, kurtosis, tail ratios
 
 ### 4. Data Layer
 The `DataLayer` provides efficient access to market data using DuckDB and Parquet files.
@@ -153,30 +158,22 @@ Supported timezones include:
 - `Australia/Sydney`
 - And [many others](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
 
-### Market Hours Handling
+### Calendar-based Market Hours and Timezone
 
-Vegas lets you control how regular and extended market hours are handled:
+Vegas uses calendars to filter valid trading sessions:
 
 ```python
-# Set specific market hours
-engine = BacktestEngine(timezone="US/Eastern")
-engine.set_trading_hours("NASDAQ", open="09:30", close="16:00")
-
-# Exclude extended hours data (pre-market and after-hours)
-engine.ignore_extended_hours(True)
+engine = BacktestEngine()
+engine.set_calendar("NYSE")  # engine timezone will follow the calendar
 ```
 
 Using the CLI:
 
 ```bash
-# Run with only regular market hours
-vegas run my_strategy.py --regular-hours-only
-
-# Customize market hours
-vegas run my_strategy.py --market NYSE --market-open 09:30 --market-close 16:00
+vegas run my_strategy.py --calendar NYSE
 ```
 
-See [Market Hours Documentation](docs/market_hours.md) for more details.
+See [Calendar/Market Hours Documentation](docs/market_hours.md) for more details.
 
 ## License
 

@@ -11,7 +11,7 @@ import re
 import shutil
 import tempfile
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import duckdb
 import polars as pl
@@ -972,9 +972,9 @@ class DatabaseManager:
         self,
         start_date: datetime = None,
         end_date: datetime = None,
-        symbols: List[str] = None,
+        symbols: Optional[List[str]] = None,
         timezone: str = "UTC",
-        bar_count: int = None,
+        bar_count: Optional[int] = None,
     ) -> pl.DataFrame:
         """Query market data with flexible time and symbol filters.
 

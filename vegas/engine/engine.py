@@ -25,6 +25,14 @@ Design goals and rationale:
   screening workflows.
 - Graceful failure defaults (e.g., empty dataframes) to keep iterative research
   workflows resilient.
+
+Market-hours unification:
+
+- Trading session filtering is governed by a single calendar source
+  (``vegas.calendars``). The engine selects a calendar (default ``"24/7"``)
+  and the ``DataPortal`` filters timestamps accordingly. Any legacy engine
+  helpers for Regular Trading Hours (RTH) have been removed in favor of this
+  unified approach.
 """
 
 import logging
@@ -34,11 +42,14 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import polars as pl
 
+from vegas.analytics import Results
+from vegas.analytics.results_helper import create_results_from_dict
 from vegas.broker import Broker
 from vegas.data import DataLayer, DataPortal
 from vegas.pipeline.engine import PipelineEngine
 from vegas.portfolio import Portfolio
 from vegas.strategy import Context, Signal, Strategy
+from vegas.calendars import get_calendar
 
 
 class BacktestEngine:
@@ -53,8 +64,8 @@ class BacktestEngine:
         >>> from vegas.engine import BacktestEngine
         >>> from datetime import datetime
         >>> engine = BacktestEngine(data_dir="db", timezone="UTC")
-        >>> engine.set_trading_hours(market_name="US", open_time="09:30", close_time="16:00")
-        >>> engine.ignore_extended_hours(ignore=True)
+        >>> # Select a trading calendar (e.g., NYSE or 24/7)
+        >>> engine._calendar_name = "NYSE"
         >>> # engine.load_data(directory="/path/to/csvs")  # optional if already loaded
         >>> # results = engine.run(
         ... #     start=datetime(2021, 1, 1),
@@ -94,14 +105,12 @@ class BacktestEngine:
         self.strategy: Optional[Strategy] = None
         self.portfolio: Optional[Portfolio] = None
         self.broker: Optional[Broker] = None
+        # Engine timezone follows calendar selection; default to calendar's tz later
         self.timezone = timezone
 
-        # Trading hours configuration defaults to US RTH. Users can override via
-        # ``set_trading_hours`` or disable filtering via ``ignore_extended_hours``.
-        self._market_open_time = "09:30"
-        self._market_close_time = "16:00"
-        self._market_name = "US"
-        self._ignore_extended_hours = False
+        # Selected trading calendar name; used by DataPortal for timestamp filtering.
+        # Default calendar is 24/7 (no filtering).
+        self._calendar_name: str = "24/7"
 
         # Pipeline scheduling engine: pipelines are computed once per day to
         # support ranking/screening workflows aligned to the research cadence.
@@ -109,54 +118,22 @@ class BacktestEngine:
         self.attached_pipelines: Dict[str, Any] = {}
         self._pipeline_results: Dict[str, pl.DataFrame] = {}
 
-    def set_trading_hours(
-        self,
-        market_name: str = "US",
-        open_time: str = "09:30",
-        close_time: str = "16:00",
-    ) -> None:
-        """Set the Regular Trading Hours (RTH) window used by the engine.
+    def set_calendar(self, name: str) -> None:
+        """Select the trading calendar used to filter market data.
 
-        This configuration is applied when ``ignore_extended_hours`` is set to
-        ``True``. It allows users to focus simulations on the most liquid part of
-        the trading day.
-
-        :param market_name: Human-readable market label (e.g., ``"NASDAQ"``, ``"NYSE"``).
-        :type market_name: str
-        :param open_time: Market open time in 24-hour format (``HH:MM``).
-        :type open_time: str
-        :param close_time: Market close time in 24-hour format (``HH:MM``).
-        :type close_time: str
+        :param name: Calendar name (e.g., "NYSE", "24/7").
+        :type name: str
+        :raises KeyError: If the calendar name is not recognized.
         :returns: None
         :rtype: None
         :Example:
-            >>> engine.set_trading_hours("US", open_time="09:30", close_time="16:00")
+            >>> engine.set_calendar("NYSE")
         """
-        self._market_name = market_name
-        self._market_open_time = open_time
-        self._market_close_time = close_time
-        self._logger.info(
-            f"Set trading hours for {market_name}: {open_time} to {close_time}"
-        )
+        # Validate early and store name; actual instance is resolved at load time
+        get_calendar(name)
+        self._calendar_name = name
 
-    def ignore_extended_hours(self, ignore: bool = True) -> None:
-        """Control whether to restrict data to Regular Trading Hours (RTH).
-
-        When enabled, the engine will request data from the ``DataPortal``
-        constrained to the configured RTH window. This is useful to align
-        backtests with live execution constraints or to reduce noise from
-        illiquid extended-hours prints.
-
-        :param ignore: If ``True``, exclude pre/post-market data; if ``False``, include all available timestamps.
-        :type ignore: bool
-        :returns: None
-        :rtype: None
-        :Example:
-            >>> engine.ignore_extended_hours(True)
-        """
-        self._ignore_extended_hours = ignore
-        status = "ignored" if ignore else "included"
-        self._logger.info(f"Extended hours data will be {status}")
+    # Legacy market-hours helpers removed in favor of calendar-based filtering.
 
     def attach_pipeline(self, pipeline: Any, name: str) -> Any:
         """Register a pipeline to compute once per trading day.
@@ -297,28 +274,7 @@ class BacktestEngine:
             pass
         return universe
 
-    def _is_regular_market_hours(self, timestamp: datetime) -> bool:
-        """Return whether ``timestamp`` falls within configured RTH.
-
-        This helper keeps a single definition of what counts as in-hours.
-        Although the engine now filters via the ``DataPortal`` on load, this
-        method remains for strategies/utilities that might use it directly.
-
-        :param timestamp: The timestamp to evaluate.
-        :type timestamp: datetime
-        :returns: ``True`` if within RTH bounds, otherwise ``False``.
-        :rtype: bool
-        :Example:
-            >>> engine._is_regular_market_hours(datetime(2023, 1, 1, 10, 5))
-            True
-        """
-        # Parse market hours once to minutes to use a cheap integer comparison.
-        open_hour, open_minute = map(int, self._market_open_time.split(":"))
-        close_hour, close_minute = map(int, self._market_close_time.split(":"))
-        timestamp_minutes = timestamp.hour * 60 + timestamp.minute
-        open_minutes = open_hour * 60 + open_minute
-        close_minutes = close_hour * 60 + close_minute
-        return open_minutes <= timestamp_minutes < close_minutes
+    # _is_regular_market_hours removed; use calendars via ``vegas.calendars``.
 
     def load_data(
         self,
@@ -378,7 +334,7 @@ class BacktestEngine:
         end: datetime,
         strategy: Strategy,
         initial_capital: float = 100_000.0,
-    ) -> Dict[str, Any]:
+    ) -> Results:
         """Run a historical backtest between ``start`` and ``end``.
 
         The engine wires the provided ``strategy`` to a ``Portfolio`` and
@@ -395,8 +351,8 @@ class BacktestEngine:
         :type strategy: Strategy
         :param initial_capital: Initial cash balance used to seed the portfolio and broker.
         :type initial_capital: float
-        :returns: A dictionary containing stats, equity curve, transactions, positions, and success flag.
-        :rtype: dict
+        :returns: A Results object containing stats, equity curve, transactions, positions, and success flag.
+        :rtype: Results
         :raises Exception: Propagates exceptions thrown by user strategy code or I/O layers.
         :Example:
             >>> results = engine.run(start, end, my_strategy, initial_capital=50_000)
@@ -420,38 +376,45 @@ class BacktestEngine:
             self
         )  # Allow strategies to access engine helpers like pipelines
 
-        # Expose commission namespace prior to initialize to make configuration ergonomic.
+        # Expose helper namespaces prior to initialize to make configuration ergonomic.
         try:
             from vegas.broker.commission import commission as _commission_ns
 
             context.commission = _commission_ns
         except Exception:
             pass
+        try:
+            from vegas.broker.slippage import slippage as _slippage_ns
+
+            context.slippage = _slippage_ns
+        except Exception:
+            pass
 
         # Allow strategy to configure commission in initialize; this mirrors typical live setup.
         self.strategy.initialize(context)
 
-        # If a commission model was set by the strategy, propagate it to the broker.
+        # If models were set by the strategy, propagate them to the broker.
         try:
             self._commission_model = context.get_commission_model()
             if self._commission_model is not None:
                 self.broker.commission_model = self._commission_model
         except Exception:
             self._commission_model = None
+        try:
+            _slippage_model = context.get_slippage_model()
+            if _slippage_model is not None:
+                self.broker.slippage_model = _slippage_model
+        except Exception:
+            pass
 
         start_time = time.time()
-
-        # Prepare an optional market hours filter applied by the broker when executing orders.
-        market_hours: Optional[Tuple[str, str]] = None
-        if self._ignore_extended_hours:
-            market_hours = (self._market_open_time, self._market_close_time)
 
         # Build the unified timestamp index that will drive daily/intraday iteration.
         timestamp_index: pl.Series = self._prepare_market_data(start, end)
 
         # Run the backtest
         self._logger.info("Executing backtest")
-        results_dict = self._run_backtest(context, timestamp_index, market_hours)
+        results_dict = self._run_backtest(context, timestamp_index)
 
         # Calculate execution time
         execution_time = time.time() - start_time
@@ -460,10 +423,13 @@ class BacktestEngine:
         # Add execution time to results
         results_dict["execution_time"] = execution_time
 
+        # Create Results object from the dictionary
+        results = create_results_from_dict(results_dict)
+
         # Allow strategy to analyze results
         self.strategy.analyze(context, results_dict)
 
-        return results_dict
+        return results
 
     def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
         """Load and prepare data; return the unified timestamp index.
@@ -523,16 +489,24 @@ class BacktestEngine:
             pass
 
         # Preload the DataPortal cache to amortize I/O and speed up the run loop.
+        # Resolve calendar and propagate timezone to data components
+        cal = get_calendar(getattr(self, "_calendar_name", "24/7"))
+        try:
+            # Align engine and data layer/portal timezones to the calendar's timezone
+            self.timezone = getattr(cal, "timezone", self.timezone)
+            if hasattr(self.data_layer, "timezone"):
+                self.data_layer.timezone = self.timezone
+            if hasattr(self.data_portal, "timezone"):
+                self.data_portal.timezone = self.timezone
+        except Exception:
+            pass
+
         self.data_portal.load_data(
             start_date=preload_start,
             end_date=end,
             symbols=strategy_universe,
             frequencies=sorted(frequency_set),
-            market_hours=(
-                (self._market_open_time, self._market_close_time)
-                if self._ignore_extended_hours
-                else None
-            ),
+            calendar=cal,
         )
 
         # Build and return the timestamp index from the cache.
@@ -542,7 +516,6 @@ class BacktestEngine:
         self,
         context: Context,
         timestamp_index: Optional[pl.Series] = None,
-        market_hours: Optional[Tuple[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute the backtest loop over the provided timestamp index.
 
@@ -648,12 +621,14 @@ class BacktestEngine:
                     if universe:
                         try:
                             transactions = self.broker.execute_orders_with_portal(
-                                sorted(list(universe)), timestamp, market_hours
+                                sorted(list(universe)), timestamp
                             )
                         except Exception:
                             transactions = []
 
-                    # Update portfolio with transactions
+                    # Update portfolio with transactions or an empty DataFrame if no transactions
+                    # This ensures valuations and stats are computed once per timestamp
+                    transactions_pl = pl.DataFrame()
                     if transactions:
                         transactions_pl = pl.from_records(
                             [
@@ -666,13 +641,8 @@ class BacktestEngine:
                                 for t in transactions
                             ]
                         )
-                        # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
-                        self.portfolio.update_from_transactions(
-                            timestamp, transactions_pl
-                        )
-
-                    # Ensure valuations and stats are computed even if no fills occurred at this timestamp.
-                    self.portfolio.update_from_transactions(timestamp, pl.DataFrame())
+                    # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
+                    self.portfolio.update_from_transactions(timestamp, transactions_pl)
 
                     # Call on_market_close at the end of the trading day
                     # Assuming last timestamp of the day is market close

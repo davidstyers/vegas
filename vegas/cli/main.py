@@ -17,935 +17,650 @@ import matplotlib.pyplot as plt
 import polars as pl
 from tabulate import tabulate
 
+from vegas.analytics import generate_quantstats_report
 from vegas.calendars import get_calendar
 from vegas.data import DataLayer
 from vegas.engine import BacktestEngine
 from vegas.strategy import Strategy
 
 
-def load_strategy_from_file(file_path):
-    """Load a `Strategy` subclass from a Python file path.
+class VegasCLI:
+    """Object-oriented CLI wrapper for Vegas.
 
-    :param file_path: Path to a Python module defining a `Strategy` subclass.
-    :type file_path: str | os.PathLike
-    :returns: The first discovered `Strategy` subclass in the module.
-    :rtype: type[Strategy]
-    :raises FileNotFoundError: If the file does not exist.
-    :raises ImportError: If the module cannot be imported or loaded.
-    :raises ValueError: If no `Strategy` subclass is found.
-    :Example:
-        >>> StrategyClass = load_strategy_from_file('my_strategy.py')
+    Encapsulates argument parsing, logging configuration, and subcommand handlers
+    to provide a reusable programmatic API and a consistent CLI interface.
     """
-    file_path = Path(file_path).resolve()
-    if not file_path.exists():
-        raise FileNotFoundError(f"Strategy file not found: {file_path}")
 
-    module_name = file_path.stem
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None:
-        raise ImportError(f"Could not import {file_path}")
+    def __init__(self) -> None:
+        self.logger = logging.getLogger("vegas.cli")
+        self.parser = self._build_parser()
+        self.calendar = None
 
-    module = importlib.util.module_from_spec(spec)
-    if spec.loader is None:
-        raise ImportError(f"Could not load {file_path}")
+    def _build_parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(description="Vegas Backtesting Engine CLI")
+        subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
-    spec.loader.exec_module(module)
-
-    # Find all Strategy subclasses in the module
-    strategy_classes = [
-        obj
-        for name, obj in inspect.getmembers(module)
-        if inspect.isclass(obj) and issubclass(obj, Strategy) and obj != Strategy
-    ]
-
-    if not strategy_classes:
-        raise ValueError(f"No Strategy subclass found in {file_path}")
-
-    # If multiple strategy classes found, use the first one
-    if len(strategy_classes) > 1:
-        logging.warning(
-            f"Multiple strategy classes found in {file_path}. Using {strategy_classes[0].__name__}"
+        # Common arguments
+        common_parser = argparse.ArgumentParser(add_help=False)
+        common_parser.add_argument(
+            "--verbose", "-v", action="store_true", help="Enable verbose output"
+        )
+        common_parser.add_argument(
+            "--db-dir", type=str, default="db", help="Database directory"
         )
 
-    return strategy_classes[0]
+        # Run command
+        run_parser = subparsers.add_parser(
+            "run", parents=[common_parser], help="Run a backtest"
+        )
+        run_parser.add_argument("strategy_file", type=str, help="Strategy file to run")
+        run_parser.add_argument("--data-file", type=str, help="Data file to use")
+        run_parser.add_argument("--data-dir", type=str, help="Data directory to use")
+        run_parser.add_argument(
+            "--file-pattern", type=str, default="*.csv", help="File pattern for data files"
+        )
+        run_parser.add_argument(
+            "--start", dest="start_date", type=self.parse_date, help="Start date (YYYY-MM-DD)"
+        )
+        run_parser.add_argument(
+            "--end", dest="end_date", type=self.parse_date, help="End date (YYYY-MM-DD)"
+        )
+        run_parser.add_argument(
+            "--capital", type=float, default=100000.0, help="Initial capital"
+        )
+        run_parser.add_argument(
+            "--output", type=str, help="Output file for equity curve chart"
+        )
+        run_parser.add_argument("--results-csv", type=str, help="Save results to CSV file")
+        run_parser.add_argument("--report", type=str, help="Generate QuantStats report")
+        run_parser.add_argument("--benchmark", type=str, help="Benchmark symbol for report")
+        run_parser.add_argument(
+            "--calendar",
+            type=str,
+            default="24/7",
+            help="Trading calendar name (e.g., NYSE, 24/7)",
+        )
+        run_parser.add_argument(
+            "--mode",
+            type=str,
+            choices=["backtest", "live"],
+            default="backtest",
+            help="Execution mode",
+        )
+        run_parser.add_argument(
+            "--dump-positions",
+            nargs="?",
+            const="__DEFAULT__",
+            help="Dump all positions (open and closed) at end of run. Optional path to write CSV",
+        )
+        run_parser.set_defaults(func=self.run_backtest)
 
+        # Ingest command
+        ingest_parser = subparsers.add_parser(
+            "ingest", parents=[common_parser], help="Ingest data into the database"
+        )
+        ingest_source = ingest_parser.add_mutually_exclusive_group(required=True)
+        ingest_source.add_argument("--file", type=str, help="Data file to ingest")
+        ingest_source.add_argument("--directory", type=str, help="Data directory to ingest")
+        ingest_parser.add_argument(
+            "--pattern", type=str, default="*.csv", help="File pattern for data files"
+        )
+        ingest_parser.add_argument(
+            "--max-files", type=int, help="Maximum number of files to ingest"
+        )
+        ingest_parser.add_argument(
+            "--timezone",
+            type=str,
+            default="UTC",
+            help="Timezone name (e.g., UTC, US/Eastern)",
+        )
+        ingest_parser.set_defaults(func=self.ingest_data)
 
-def parse_date(date_str):
-    """Parse a date in `YYYY-MM-DD` format into a `datetime`.
+        # Ingest OHLCV command
+        ohlcv_parser = subparsers.add_parser(
+            "ingest-ohlcv", parents=[common_parser], help="Ingest OHLCV data"
+        )
+        ohlcv_source = ohlcv_parser.add_mutually_exclusive_group(required=True)
+        ohlcv_source.add_argument("--file", type=str, help="OHLCV file to ingest")
+        ohlcv_source.add_argument(
+            "--directory", type=str, help="Directory with OHLCV files"
+        )
+        ohlcv_parser.add_argument(
+            "--max-files", type=int, help="Maximum number of files to ingest"
+        )
+        ohlcv_parser.add_argument(
+            "--timezone",
+            type=str,
+            default="UTC",
+            help="Timezone name (e.g., UTC, US/Eastern)",
+        )
+        ohlcv_parser.set_defaults(func=self.ingest_ohlcv)
 
-    :param date_str: Date string or ``None``.
-    :type date_str: Optional[str]
-    :returns: Parsed `datetime` or ``None`` if not provided.
-    :rtype: Optional[datetime]
-    :raises argparse.ArgumentTypeError: If the format is invalid.
-    """
-    if not date_str:
-        return None
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Invalid date format: {date_str}. Use YYYY-MM-DD"
+        # DB status command
+        status_parser = subparsers.add_parser(
+            "db-status", parents=[common_parser], help="Show database status"
+        )
+        status_parser.add_argument(
+            "--detailed", action="store_true", help="Show detailed status"
+        )
+        status_parser.set_defaults(func=self.db_status)
+
+        # DB query command
+        query_parser = subparsers.add_parser(
+            "db-query", parents=[common_parser], help="Execute SQL query"
+        )
+        query_parser.add_argument("--query", type=str, help="SQL query to execute")
+        query_parser.add_argument(
+            "--query-file", type=str, help="File containing SQL query"
+        )
+        query_parser.add_argument(
+            "--output", type=str, help="Output file for query results"
+        )
+        query_parser.add_argument(
+            "--limit", type=int, default=100, help="Maximum rows to display"
+        )
+        query_parser.set_defaults(func=self.db_query)
+
+        # Delete DB command
+        delete_parser = subparsers.add_parser(
+            "delete-db", parents=[common_parser], help="Delete the database"
+        )
+        delete_parser.add_argument(
+            "--force", action="store_true", help="Force deletion without confirmation"
+        )
+        delete_parser.set_defaults(func=self.delete_db)
+
+        return parser
+
+    def _configure_logging(self, verbose: bool) -> None:
+        log_level = logging.DEBUG if verbose else logging.INFO
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        logging.basicConfig(
+            level=log_level,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[logging.StreamHandler()],
         )
 
+    def run(self, argv: list[str] | None = None) -> int:
+        args = self.parser.parse_args(argv)
+        self._configure_logging(getattr(args, "verbose", False))
+        if hasattr(args, "func"):
+            return args.func(args)
+        self.parser.print_help()
+        return 1
 
-def run_backtest(args):
-    """Run a backtest using arguments from the CLI parser.
-
-    :param args: Parsed arguments namespace.
-    :type args: argparse.Namespace
-    :returns: Process exit code (0 on success, non-zero on failure).
-    :rtype: int
-    """
-    # Get logger for CLI
-    logger = logging.getLogger("vegas.cli")
-
-    try:
-        # Load strategy from file
-        strategy_class = load_strategy_from_file(args.strategy_file)
-        logger.info(f"Loaded strategy: {strategy_class.__name__}")
-
-        # Initialize engine
-        engine = BacktestEngine(timezone=args.timezone)
-
-        # Configure simulation calendar (mandatory)
-        engine._calendar_name = args.calendar
+    # Utilities
+    @staticmethod
+    def parse_date(date_str: str | None) -> datetime | None:
+        if not date_str:
+            return None
         try:
-            # Validate early
-            get_calendar(args.calendar)
-        except Exception as e:
-            logger.error(f"Invalid calendar '{args.calendar}': {e}")
-            return 1
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid date format: {date_str}. Use YYYY-MM-DD"
+            ) from exc
 
-        # Load data
-        load_data(engine, args, logger)
-
-        # Get data info
-        data_info = engine.data_layer.get_data_info()
-        logger.info(
-            f"Database contains {data_info['symbol_count']} symbols for {data_info['days']} days"
-        )
-
-        # Set up backtest dates
-        start_date = args.start_date or data_info["start_date"]
-        end_date = args.end_date or data_info["end_date"]
-
-        logger.info(
-            f"Running backtest from {start_date.date()} to {end_date.date()} in timezone {args.timezone}"
-        )
-
-        # Run backtest or live depending on mode
-        strategy = strategy_class()
-        if getattr(args, "mode", "backtest") == "live":
-            # Live mode plumbing only; no external adapters constructed here per scope.
-            results = engine.run_live(
-                start=start_date,
-                end=end_date,
-                strategy=strategy,
-                feed=None,
-                broker=None,
+    @staticmethod
+    def load_strategy_from_file(file_path: str) -> type[Strategy]:
+        file_path = Path(file_path).resolve()
+        if not file_path.exists():
+            raise FileNotFoundError(f"Strategy file not found: {file_path}")
+        module_name = file_path.stem
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not import {file_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        strategy_classes = [
+            obj
+            for _, obj in inspect.getmembers(module)
+            if inspect.isclass(obj) and issubclass(obj, Strategy) and obj is not Strategy
+        ]
+        if not strategy_classes:
+            raise ValueError(f"No Strategy subclass found in {file_path}")
+        if len(strategy_classes) > 1:
+            logging.warning(
+                "Multiple strategy classes found in %s. Using %s",
+                str(file_path),
+                strategy_classes[0].__name__,
             )
-        else:
-            results = engine.run(
-                start=start_date,
-                end=end_date,
-                strategy=strategy,
-                initial_capital=args.capital,
-            )
-        # Print results
-        print_results(results, strategy_class.__name__, logger)
+        return strategy_classes[0]
 
-        # Generate outputs if requested
-        generate_outputs(results, strategy_class.__name__, args)
+    # Command handlers
+    def run_backtest(self, args: argparse.Namespace) -> int:
+        try:
+            strategy_class = self.load_strategy_from_file(args.strategy_file)
+            self.logger.info("Loaded strategy: %s", strategy_class.__name__)
 
-        # Dump positions ledger if requested (kept here per original placement)
-        if hasattr(args, "dump_positions") and args.dump_positions is not None:
+            engine = None
+            self.calendar = get_calendar(args.calendar)
             try:
-                df = engine.dump_positions_ledger()
-            except Exception as e:
-                logger.error(f"dump_positions_ledger failed: {e}")
-                df = pl.DataFrame()
+                engine = BacktestEngine(timezone=self.calendar.timezone)
 
-            # Prepare tabulate output with ISO timestamps
-            if isinstance(df, pl.DataFrame) and df.height > 0:
-                disp = df
-                if "pos_open_ts" in disp.columns:
-                    disp = disp.with_columns(
-                        pl.col("pos_open_ts").map_elements(
-                            lambda x: x.isoformat() if x is not None else "",
-                            return_dtype=pl.Utf8,
-                        )
-                    )
-                if "pos_close_ts" in disp.columns:
-                    disp = disp.with_columns(
-                        pl.col("pos_close_ts").map_elements(
-                            lambda x: x.isoformat() if x is not None else "",
-                            return_dtype=pl.Utf8,
-                        )
-                    )
-                headers = disp.columns
-                rows = [[row.get(col) for col in headers] for row in disp.to_dicts()]
-                table = tabulate(
-                    rows, headers=headers, tablefmt="fancy_grid", floatfmt=".4f"
-                )
-                print("\nPositions Ledger:\n" + table)
-            else:
-                print("\nPositions Ledger:\n(empty)")
-
-            # Determine CSV path behavior
-            path_arg = args.dump_positions
-            if path_arg == "__DEFAULT__":
-                csv_path = "./positions_ledger.csv"
-            elif isinstance(path_arg, str):
-                csv_path = path_arg
-            else:
-                csv_path = None
-
-            # Write CSV if a path was provided (explicitly or default sentinel)
-            if csv_path:
                 try:
-                    df_out = (
-                        df.clone() if isinstance(df, pl.DataFrame) else pl.DataFrame()
+                    engine.set_calendar(args.calendar)
+                    self.logger.info(
+                        "Set calendar to %s",
+                        self.calendar,
                     )
-                    if isinstance(df_out, pl.DataFrame) and df_out.height > 0:
-                        if "pos_open_ts" in df_out.columns:
-                            df_out = df_out.with_columns(
-                                pl.col("pos_open_ts").cast(pl.Utf8)
-                            )
-                        if "pos_close_ts" in df_out.columns:
-                            df_out = df_out.with_columns(
-                                pl.col("pos_close_ts").cast(pl.Utf8)
-                            )
-                    df_out.write_csv(csv_path)
-                    logger.info(f"Positions ledger CSV written to {csv_path}")
                 except Exception as e:
-                    logger.error(f"Failed to write positions ledger CSV: {e}")
+                    self.logger.error("Invalid calendar '%s': %s", self.calendar, e)
+                    return 1
 
-        return 0
-    finally:
-        engine.data_layer.close()
+                # Load data
+                self._load_data(engine, args)
 
-
-def load_data(engine, args, logger):
-    """Load data into the engine based on CLI arguments.
-
-    Priority:
-      1) --data-file
-      2) --data-dir (with optional --file-pattern)
-      3) Already loaded/ingested data via `DataLayer`
-    """
-    try:
-        if args.data_file:
-            logger.info(f"Loading data from file: {args.data_file}")
-            engine.load_data(file_path=args.data_file)
-        elif args.data_dir:
-            logger.info(f"Loading data from directory: {args.data_dir}")
-            engine.load_data(directory=args.data_dir, file_pattern=args.file_pattern)
-        else:
-            # Try to use already loaded/ingested data
-            logger.info("No data source specified, using already ingested data")
-            if not engine.data_layer.is_initialized():
-                logger.error(
-                    "No data available. Please provide a data source or ingest data first."
-                )
-                raise ValueError("No data available")
-    except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        raise
-
-
-def print_results(results, strategy_name, logger):
-    """Print a compact, tabulated summary of backtest results to stdout.
-
-    :param results: Results dictionary returned by the engine.
-    :type results: Dict[str, Any]
-    :param strategy_name: Name of the executed strategy.
-    :type strategy_name: str
-    :param logger: Logger instance for CLI.
-    :type logger: logging.Logger
-    :returns: None
-    :rtype: None
-    """
-    stats = results["stats"]
-    rows = [[k, v] for k, v in results["stats"].items()]
-    logger.info(
-        f"\n\n{strategy_name} Backtest Results:\n"
-        + tabulate(
-            rows,
-            headers=["Statistic", "Value"],
-            tablefmt="rounded_grid",
-            colalign=("center", "right"),
-            floatfmt=",.2f",
-        )
-        + f"\n\nExecution Time: {results['execution_time']:.2f} seconds"
-    )
-
-
-def generate_outputs(results, strategy_name, args):
-    """Generate artifacts (plot, CSV, report) based on CLI arguments.
-
-    Produces an equity curve plot, exports CSV, and optionally generates a
-    QuantStats HTML report when requested.
-    """
-    logger = logging.getLogger("vegas.cli")
-    equity_curve = results["equity_curve"]
-
-    # Save equity curve plot if output file is specified
-    if args.output and not equity_curve.empty:
-        plt.figure(figsize=(12, 6))
-        plt.plot(equity_curve["timestamp"], equity_curve["equity"])
-        plt.title(f"Portfolio Equity Curve - {strategy_name}")
-        plt.xlabel("Date")
-        plt.ylabel("Equity ($)")
-        plt.grid(True)
-        plt.savefig(args.output)
-        logger.info(f"Equity curve saved to {args.output}")
-
-    # Save results to CSV if requested
-    if args.results_csv and not equity_curve.empty:
-        equity_curve.to_csv(args.results_csv, index=False)
-        logger.info(f"Results saved to {args.results_csv}")
-
-    # Generate QuantStats report if requested
-    if args.report:
-        generate_quantstats_report(
-            results, strategy_name, args.report, args.benchmark, logger
-        )
-
-
-def generate_quantstats_report(results, strategy_name, report_path, benchmark, logger):
-    """Generate a QuantStats performance report.
-
-    :param results: Engine results dictionary.
-    :param strategy_name: Strategy class name.
-    :param report_path: Output path for report HTML.
-    :param benchmark: Optional benchmark symbol.
-    :param logger: Logger instance.
-    """
-    try:
-        import os
-
-        import pandas as pd
-        import quantstats as qs
-
-        # Prepare returns series for QuantStats
-        equity_curve = results["equity_curve"]
-        # Ensure the returns have a proper datetime index
-        returns = prepare_returns_for_quantstats(equity_curve, logger)
-        pd_returns = returns.with_columns(
-            pl.col("date").cast(pl.Datetime)
-        ).to_pandas()  # ensure datetime in Polars
-        pd_returns["date"] = pd.to_datetime(
-            pd_returns["date"]
-        )  # ensure datetime in Pandas
-        pd_returns = pd_returns.set_index("date")
-        pd_returns = pd_returns["daily_return_pct"]
-
-        # Get benchmark data
-        benchmark = benchmark or "SPY"
-        logger.info(f"Generating QuantStats report with benchmark {benchmark}...")
-
-        # Make sure the directory exists
-        os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
-
-        try:
-            # Generate the report
-            qs.reports.html(
-                pd_returns,
-                benchmark=benchmark,
-                output=report_path,
-                title=f"{strategy_name} Performance Report",
-            )
-
-            if os.path.exists(report_path):
-                logger.info(f"QuantStats report saved to {report_path}")
-            else:
-                logger.error(f"Failed to create report at {report_path}")
-
-        except Exception as e:
-            logger.warning(f"Error with standard report: {e}. Trying a basic report...")
-
-            # Try with a simpler report
-            try:
-                qs.reports.basic(
-                    returns,
-                    output=report_path,
-                    title=f"{strategy_name} Basic Performance Report",
+                # Get data info
+                data_info = engine.data_layer.get_data_info()
+                self.logger.info(
+                    "Database contains %s symbols for %s days",
+                    data_info["symbol_count"],
+                    data_info["days"],
                 )
 
-                if os.path.exists(report_path):
-                    logger.info(f"Basic QuantStats report saved to {report_path}")
+                # Set up backtest dates
+                start_date = args.start_date or data_info["start_date"]
+                end_date = args.end_date or data_info["end_date"]
+
+                self.logger.info(
+                    "Running backtest from %s to %s in timezone %s",
+                    start_date.date(),
+                    end_date.date(),
+                    getattr(self.calendar, "timezone", "UTC"),
+                )
+
+                # Run backtest or live depending on mode
+                strategy = strategy_class()
+                if getattr(args, "mode", "backtest") == "live":
+                    results = engine.run_live(
+                        start=start_date,
+                        end=end_date,
+                        strategy=strategy,
+                        feed=None,
+                        broker=None,
+                    )
                 else:
-                    logger.error(f"Failed to create basic report at {report_path}")
-            except Exception as e2:
-                logger.error(f"Error generating basic report: {e2}")
+                    results = engine.run(
+                        start=start_date,
+                        end=end_date,
+                        strategy=strategy,
+                        initial_capital=args.capital,
+                    )
 
-    except ImportError:
-        logger.error("QuantStats not installed. Install with: pip install quantstats")
-    finally:
-        logger.info("QuantStats report generation complete")
+                # Print results
+                self._print_results(results, strategy_class.__name__)
 
+                # Generate outputs if requested
+                self._generate_outputs(results, strategy_class.__name__, args)
 
-def prepare_returns_for_quantstats(returns: pl.Series, logger):
-    """Prepare returns DataFrame for QuantStats report generation.
+                # Dump positions ledger if requested
+                if hasattr(args, "dump_positions") and args.dump_positions is not None:
+                    self._dump_positions(engine, args)
 
-    Ensures daily sampling when intraday timestamps are present and returns a
-    DataFrame with at least `date` and `daily_return_pct` columns suitable for
-    conversion to pandas.
-    """
-    if returns.height <= 1:
-        return returns
-
-    # Sort by timestamp column (assuming 'timestamp' is available)
-    # Polars Series does not have an index, so you must work with a DataFrame
-    # We'll assume 'returns' is a DataFrame with columns ['timestamp', 'return']
-    if not isinstance(returns, pl.DataFrame):
-        logger.error(
-            "Expected returns to be a Polars DataFrame with 'timestamp' and 'return' columns"
-        )
-        return returns
-
-    returns = returns.sort("timestamp")
-
-    timestamps = returns["timestamp"]
-
-    # Check for duplicated timestamps
-    has_duplicates = timestamps.is_duplicated().any()
-
-    # Check if minimum diff < 1 day
-    time_diffs = timestamps.diff().drop_nulls()
-    min_diff = time_diffs.min()
-    one_day_ns = 24 * 60 * 60 * 1_000_000_000  # 1 day in nanoseconds
-
-    if has_duplicates or (min_diff is not None and min_diff < one_day_ns):
-        logger.info("Resampling intraday data to daily returns")
-
-        daily_returns = (
-            returns.with_columns(pl.col("timestamp").dt.date().alias("date"))
-            .group_by("date")
-            .last()
-            .sort("date")
-            .with_columns(
-                [
-                    # Calculate daily return in dollars
-                    pl.col("equity").diff().alias("daily_return_dollars"),
-                    # Calculate daily return as percentage
-                    pl.col("equity").pct_change().alias("daily_return_pct"),
-                ]
-            )
-            .select(
-                [
-                    "timestamp",
-                    "equity",
-                    "cash",
-                    "daily_return_dollars",
-                    "daily_return_pct",
-                    "date",
-                ]
-            )
-        )
-
-        daily_returns = daily_returns.filter(pl.col("daily_return_pct").is_not_null())
-
-        if daily_returns.height > 1:
-            # Return a Series with daily_return, optionally with 'date' column if needed
-            return daily_returns.select(["date", "daily_return_pct"])
-
-    return returns
-
-
-def ingest_data(args):
-    """Ingest CSV data into the database based on CLI arguments.
-
-    :returns: Exit code integer (0 on success).
-    :rtype: int
-    """
-    # Get logger for CLI
-    logger = logging.getLogger("vegas.cli")
-
-    try:
-        # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir, timezone=args.timezone)
-
-        if args.file:
-            # Check if file exists
-            if not os.path.exists(args.file):
-                logger.error(f"File not found: {args.file}")
-                return 1
-
-            logger.info(f"Ingesting data from file: {args.file}")
-
-            # Load and ingest data
-            data_layer.load_data(file_path=args.file)
-            logger.info("Data ingestion complete")
-
-        elif args.directory:
-            # Check if directory exists
-            if not os.path.exists(args.directory):
-                logger.error(f"Directory not found: {args.directory}")
-                return 1
-
-            logger.info(f"Ingesting data from directory: {args.directory}")
-
-            # Set max files if specified
-            max_files = (
-                args.max_files if args.max_files and args.max_files > 0 else None
-            )
-
-            # Load and ingest data
-            data_layer.load_data(
-                directory=args.directory, file_pattern=args.pattern, max_files=max_files
-            )
-            logger.info("Data ingestion complete")
-
-        else:
-            logger.error("No data source specified. Provide --file or --directory")
-            return 1
-
-        # Print data info
-        info = data_layer.get_data_info()
-        print("\nData ingestion summary:")
-        print(f"Symbols: {info['symbol_count']}")
-        if info["start_date"] is not None and info["end_date"] is not None:
-            start_date = (
-                info["start_date"].date()
-                if hasattr(info["start_date"], "date")
-                else info["start_date"]
-            )
-            end_date = (
-                info["end_date"].date()
-                if hasattr(info["end_date"], "date")
-                else info["end_date"]
-            )
-            print(f"Date range: {start_date} to {end_date}")
-
-        return 0
-
-    except Exception as e:
-        logger.error(f"Data ingestion failed: {e}")
-        return 1
-
-
-def ingest_ohlcv(args):
-    """Ingest .ohlcv-1h.csv.zst OHLCV files into the database.
-
-    :returns: Exit code integer (0 on success).
-    :rtype: int
-    """
-    # Get logger for CLI
-    logger = logging.getLogger("vegas.cli")
-
-    try:
-        # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir, timezone=args.timezone)
-
-        if not data_layer.db_manager:
-            logger.error("Database manager initialization failed")
-            return 1
-
-        if args.file:
-            # Ingest a single OHLCV file
-            if not os.path.exists(args.file):
-                logger.error(f"File not found: {args.file}")
-                return 1
-
-            logger.info(f"Ingesting OHLCV file: {args.file}")
-
-            try:
-                rows = data_layer.ingest_ohlcv_file(args.file)
-                logger.info(f"Ingested {rows} rows from OHLCV file")
-
-            except Exception as e:
-                logger.error(f"Failed to ingest OHLCV file: {e}")
-                return 1
-
-        elif args.directory:
-            # Ingest OHLCV files from a directory
-            if not os.path.exists(args.directory):
-                logger.error(f"Directory not found: {args.directory}")
-                return 1
-
-            logger.info(f"Ingesting OHLCV files from directory: {args.directory}")
-
-            try:
-                max_files = (
-                    args.max_files if args.max_files and args.max_files > 0 else None
-                )
-                rows = data_layer.ingest_ohlcv_directory(
-                    args.directory, max_files=max_files
-                )
-                logger.info(f"Ingested {rows} rows from OHLCV files")
-
-            except Exception as e:
-                logger.error(f"Failed to ingest OHLCV directory: {e}")
-                return 1
-
-        else:
-            logger.error("No data source specified. Provide --file or --directory")
-            return 1
-
-        # Print database status
-        print("\nDatabase status after ingestion:")
-        db_status_internal(args)
-
-        return 0
-
-    except Exception as e:
-        logger.error(f"OHLCV ingestion failed: {e}")
-        return 1
-
-
-def db_status(args):
-    """Display database status and basic statistics.
-
-    :returns: Exit code integer (0 on success).
-    :rtype: int
-    """
-    return db_status_internal(args)
-
-
-def db_status_internal(args):
-    """Internal helper that implements `db-status` CLI command."""
-    logger = logging.getLogger("vegas.cli")
-
-    # Ensure detailed attribute exists with default value
-    if not hasattr(args, "detailed"):
-        args.detailed = False
-
-    try:
-        # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir)
-
-        if not data_layer.db_manager:
-            logger.error("Database manager initialization failed")
-            return 1
-
-        # Get database info
-        try:
-            db_size = data_layer.db_manager.get_database_size()
-            dates = data_layer.db_manager.get_available_dates()
-            symbols = data_layer.db_manager.get_available_symbols()
-            sources = data_layer.db_manager.get_data_sources()
-
-            # Print database info
-            print("\nDatabase Status:")
-            print(f"Database location: {data_layer.db_path}")
-            print(f"Database size: {db_size / (1024 * 1024):.2f} MB")
-
-            if dates.empty or pd.isna(dates["start_date"].iloc[0]):
-                print("No data available in the database")
                 return 0
-
-            print(
-                f"Date range: {dates['start_date'].iloc[0].date()} to {dates['end_date'].iloc[0].date()}"
-            )
-            print(f"Days with data: {dates['day_count'].iloc[0]}")
-            print(f"Symbols: {len(symbols)}")
-            print(f"Total records: {symbols['record_count'].sum():,}")
-            print(f"Data sources: {len(sources)}")
-
-            # Print detailed info if requested
-            if getattr(args, "detailed", False):
-                if not symbols.empty:
-                    print("\nTop 10 symbols by record count:")
-                    top_symbols = symbols.nlargest(10, "record_count")
-                    for _, row in top_symbols.iterrows():
-                        print(f"  {row['symbol']}: {row['record_count']:,} records")
-
-                if not sources.empty:
-                    print("\nData sources:")
-                    for _, row in sources.iterrows():
-                        added = (
-                            row["added_date"].strftime("%Y-%m-%d %H:%M:%S")
-                            if pd.notna(row["added_date"])
-                            else "Unknown"
-                        )
-                        print(
-                            f"  {row['source_name']}: {row['row_count']:,} rows, added on {added}"
-                        )
-
-            return 0
-
-        except Exception as e:
-            logger.error(f"Failed to get database status: {e}")
+            finally:
+                if engine is not None and getattr(engine, "data_layer", None) is not None:
+                    engine.data_layer.close()
+        except Exception as exc:
+            self.logger.error("Backtest failed: %s", exc)
             return 1
 
-    except Exception as e:
-        logger.error(f"Database status check failed: {e}")
-        return 1
-
-
-def db_query(args):
-    """Execute a SQL query and print or export the results.
-
-    :returns: Exit code integer (0 on success).
-    :rtype: int
-    """
-    # Get logger for CLI
-    logger = logging.getLogger("vegas.cli")
-
-    try:
-        # Initialize data layer
-        data_layer = DataLayer(data_dir=args.db_dir)
-
-        if not data_layer.db_manager:
-            logger.error("Database manager initialization failed")
-            return 1
-
-        # Get the query from arguments or file
-        query = args.query
-        if args.query_file:
-            if not os.path.exists(args.query_file):
-                logger.error(f"Query file not found: {args.query_file}")
-                return 1
-
-            with open(args.query_file, "r") as f:
-                query = f.read()
-
-        if not query:
-            logger.error("No query specified. Use --query or --query-file")
-            return 1
-
-        # Execute the query
-        logger.info("Executing query...")
+    def ingest_data(self, args: argparse.Namespace) -> int:
         try:
-            result = data_layer.db_manager.query_to_df(query)
-
-            if result.empty:
-                print("Query returned no results")
-                return 0
-
-            # Print results
-            if args.output:
-                # Save to CSV
-                result.to_csv(args.output, index=False)
-                print(f"Results saved to {args.output}")
+            self.calendar = get_calendar(args.calendar)
+            data_layer = DataLayer(data_dir=args.db_dir, timezone=self.calendar.timezone)
+            if args.file:
+                if not os.path.exists(args.file):
+                    self.logger.error("File not found: %s", args.file)
+                    return 1
+                self.logger.info("Ingesting data from file: %s", args.file)
+                data_layer.load_data(file_path=args.file)
+                self.logger.info("Data ingestion complete")
+            elif args.directory:
+                if not os.path.exists(args.directory):
+                    self.logger.error("Directory not found: %s", args.directory)
+                    return 1
+                self.logger.info("Ingesting data from directory: %s", args.directory)
+                max_files = args.max_files if args.max_files and args.max_files > 0 else None
+                data_layer.load_data(directory=args.directory, file_pattern=args.pattern, max_files=max_files)
+                self.logger.info("Data ingestion complete")
             else:
-                # Print to console (with limit)
-                max_rows = args.limit if args.limit > 0 else len(result)
-                pl.Config.set_tbl_rows(max_rows)  # limit the number of rows displayed
-                pl.Config.set_tbl_cols(None)  # show all columns (None = no limit)
-                pl.Config.set_tbl_width_chars(None)
-                print(result)
-
-                if len(result) > max_rows:
-                    print(f"\n(Showing {max_rows} of {len(result)} rows)")
-
+                self.logger.error("No data source specified. Provide --file or --directory")
+                return 1
+            info = data_layer.get_data_info()
+            print(f"\nData ingestion summary:")
+            print(f"Symbols: {info['symbol_count']}")
+            if info["start_date"] is not None and info["end_date"] is not None:
+                start_date = info["start_date"].date() if hasattr(info["start_date"], "date") else info["start_date"]
+                end_date = info["end_date"].date() if hasattr(info["end_date"], "date") else info["end_date"]
+                print(f"Date range: {start_date} to {end_date}")
             return 0
-
         except Exception as e:
-            logger.error(f"Query execution failed: {e}")
+            self.logger.error("Data ingestion failed: %s", e)
             return 1
 
-    except Exception as e:
-        logger.error(f"Database query failed: {e}")
-        return 1
+    def ingest_ohlcv(self, args: argparse.Namespace) -> int:
+        try:
+            self.calendar = get_calendar(args.calendar)
+            data_layer = DataLayer(data_dir=args.db_dir, timezone=self.calendar.timezone)
+            if not data_layer.db_manager:
+                self.logger.error("Database manager initialization failed")
+                return 1
+            if args.file:
+                if not os.path.exists(args.file):
+                    self.logger.error("File not found: %s", args.file)
+                    return 1
+                self.logger.info("Ingesting OHLCV file: %s", args.file)
+                try:
+                    rows = data_layer.ingest_ohlcv_file(args.file)
+                    self.logger.info("Ingested %s rows from OHLCV file", rows)
+                except Exception as e:
+                    self.logger.error("Failed to ingest OHLCV file: %s", e)
+                    return 1
+            elif args.directory:
+                if not os.path.exists(args.directory):
+                    self.logger.error("Directory not found: %s", args.directory)
+                    return 1
+                self.logger.info("Ingesting OHLCV files from directory: %s", args.directory)
+                try:
+                    max_files = args.max_files if args.max_files and args.max_files > 0 else None
+                    rows = data_layer.ingest_ohlcv_directory(args.directory, max_files=max_files)
+                    self.logger.info("Ingested %s rows from OHLCV files", rows)
+                except Exception as e:
+                    self.logger.error("Failed to ingest OHLCV directory: %s", e)
+                    return 1
+            else:
+                self.logger.error("No data source specified. Provide --file or --directory")
+                return 1
+            print(f"\nDatabase status after ingestion:")
+            return self._db_status_internal(args)
+        except Exception as e:
+            self.logger.error("OHLCV ingestion failed: %s", e)
+            return 1
 
+    def db_status(self, args: argparse.Namespace) -> int:
+        return self._db_status_internal(args)
 
-def delete_db(args):
-    """Delete the DuckDB file and associated WAL if present.
+    def db_query(self, args: argparse.Namespace) -> int:
+        try:
+            data_layer = DataLayer(data_dir=args.db_dir)
+            if not data_layer.db_manager:
+                self.logger.error("Database manager initialization failed")
+                return 1
+            query = args.query
+            if args.query_file:
+                if not os.path.exists(args.query_file):
+                    self.logger.error("Query file not found: %s", args.query_file)
+                    return 1
+                with open(args.query_file, "r") as f:
+                    query = f.read()
+            if not query:
+                self.logger.error("No query specified. Use --query or --query-file")
+                return 1
+            self.logger.info("Executing query...")
+            try:
+                result = data_layer.db_manager.query_to_df(query)
+                if result.empty:
+                    print(f"Query returned no results")
+                    return 0
+                if args.output:
+                    result.to_csv(args.output, index=False)
+                    print(f"Results saved to {args.output}")
+                else:
+                    max_rows = args.limit if args.limit > 0 else len(result)
+                    pl.Config.set_tbl_rows(max_rows)
+                    pl.Config.set_tbl_cols(None)
+                    pl.Config.set_tbl_width_chars(None)
+                    print(f"{result}")
+                    if len(result) > max_rows:
+                        print(f"\n(Showing {max_rows} of {len(result)} rows)")
+                return 0
+            except Exception as e:
+                self.logger.error("Query execution failed: %s", e)
+                return 1
+        except Exception as e:
+            self.logger.error("Database query failed: %s", e)
+            return 1
 
-    Prompts for confirmation unless `--force` is provided.
-    """
-    # Get logger for CLI
-    logger = logging.getLogger("vegas.cli")
-
-    # Calculate the default database path
-    db_dir = args.db_dir or "db"
-    db_path = os.path.join(db_dir, "vegas.duckdb")
-
-    if not os.path.exists(db_path):
-        logger.info(f"Database does not exist: {db_path}")
-        return 0
-
-    # Confirm deletion if not forced
-    if not args.force:
-        confirm = input(
-            f"Are you sure you want to delete the database at {db_path}? [y/N] "
-        )
-        if confirm.lower() not in ["y", "yes"]:
-            logger.info("Database deletion cancelled")
+    def delete_db(self, args: argparse.Namespace) -> int:
+        db_dir = args.db_dir or "db"
+        db_path = os.path.join(db_dir, "vegas.duckdb")
+        if not os.path.exists(db_path):
+            self.logger.info("Database does not exist: %s", db_path)
             return 0
+        if not args.force:
+            confirm = input(
+                f"Are you sure you want to delete the database at {db_path}? [y/N] "
+            )
+            if confirm.lower() not in ["y", "yes"]:
+                self.logger.info("Database deletion cancelled")
+                return 0
+        try:
+            os.remove(db_path)
+            self.logger.info("Database deleted: %s", db_path)
+            wal_path = db_path + ".wal"
+            if os.path.exists(wal_path):
+                os.remove(wal_path)
+                self.logger.info("Database WAL file deleted: %s", wal_path)
+            return 0
+        except Exception as e:
+            self.logger.error("Failed to delete database: %s", e)
+            return 1
 
-    try:
-        # Delete the file
-        os.remove(db_path)
-        logger.info(f"Database deleted: {db_path}")
+    # Helper methods used by command handlers
+    def _load_data(self, engine: BacktestEngine, args: argparse.Namespace) -> None:
+        try:
+            if getattr(args, "data_file", None):
+                self.logger.info("Loading data from file: %s", args.data_file)
+                engine.load_data(file_path=args.data_file)
+            elif getattr(args, "data_dir", None):
+                self.logger.info("Loading data from directory: %s", args.data_dir)
+                engine.load_data(directory=args.data_dir, file_pattern=args.file_pattern)
+            else:
+                # Try to use already loaded/ingested data
+                self.logger.info("No data source specified, using already ingested data")
+                if not engine.data_layer.is_initialized():
+                    self.logger.error(
+                        "No data available. Please provide a data source or ingest data first."
+                    )
+                    raise ValueError("No data available")
+        except Exception as e:
+            self.logger.error("Error loading data: %s", e)
+            raise
 
-        # Check for and delete WAL files
-        wal_path = db_path + ".wal"
-        if os.path.exists(wal_path):
-            os.remove(wal_path)
-            logger.info(f"Database WAL file deleted: {wal_path}")
+    def _db_status_internal(self, args: argparse.Namespace) -> int:
+        try:
+            data_layer = DataLayer(data_dir=args.db_dir)
+            if not data_layer.db_manager:
+                self.logger.error("Database manager initialization failed")
+                return 1
+            try:
+                db_size = data_layer.db_manager.get_database_size()
+                dates = data_layer.db_manager.get_available_dates()
+                symbols = data_layer.db_manager.get_available_symbols()
+                sources = data_layer.db_manager.get_data_sources()
+                print(f"\nDatabase Status:")
+                print(f"Database location: {data_layer.db_path}")
+                print(f"Database size: {db_size / (1024 * 1024):.2f} MB")
+                if dates.empty:
+                    print(f"No data available in the database")
+                    return 0
+                print(
+                    f"Date range: {dates['start_date'].iloc[0].date()} to {dates['end_date'].iloc[0].date()}"
+                )
+                print(f"Days with data: {dates['day_count'].iloc[0]}")
+                print(f"Symbols: {len(symbols)}")
+                print(f"Total records: {symbols['record_count'].sum():,}")
+                print(f"Data sources: {len(sources)}")
+                if getattr(args, "detailed", False):
+                    if not symbols.empty:
+                        print(f"\nTop 10 symbols by record count:")
+                        top_symbols = symbols.nlargest(10, "record_count")
+                        for _, row in top_symbols.iterrows():
+                            print(f"  {row['symbol']}: {row['record_count']:,} records")
+                    if not sources.empty:
+                        print(f"\nData sources:")
+                        for _, row in sources.iterrows():
+                            added = (
+                                row["added_date"].strftime("%Y-%m-%d %H:%M:%S")
+                                if pl.not_null(row["added_date"])
+                                else "Unknown"
+                            )
+                            print(
+                                f"  {row['source_name']}: {row['row_count']:,} rows, added on {added}"
+                            )
+                return 0
+            except Exception as e:
+                self.logger.error("Failed to get database status: %s", e)
+                return 1
+        except Exception as e:
+            self.logger.error("Database status check failed: %s", e)
+            return 1
 
-        return 0
+    def _print_results(self, results, strategy_name: str) -> None:
+        # Handle both Results objects and dictionaries for backward compatibility
+        if hasattr(results, 'stats'):
+            # Results object
+            stats = results.stats
+            execution_time = results.execution_time
+        else:
+            # Dictionary (backward compatibility)
+            stats = results["stats"]
+            execution_time = results["execution_time"]
+            
+        rows = [[k, v] for k, v in stats.items()]
+        self.logger.info(
+            "\n\n%s Backtest Results:\n%s\n\nExecution Time: %.2f seconds",
+            strategy_name,
+            tabulate(
+                rows,
+                headers=["Statistic", "Value"],
+                tablefmt="rounded_grid",
+                colalign=("center", "right"),
+                floatfmt=",.2f",
+            ),
+            execution_time,
+        )
 
-    except Exception as e:
-        logger.error(f"Failed to delete database: {e}")
-        return 1
+    def _dump_positions(self, engine: BacktestEngine, args: argparse.Namespace) -> None:
+        try:
+            df = engine.dump_positions_ledger()
+        except Exception as e:
+            self.logger.error("dump_positions_ledger failed: %s", e)
+            df = pl.DataFrame()
+
+        if isinstance(df, pl.DataFrame) and df.height > 0:
+            disp = df
+            if "pos_open_ts" in disp.columns:
+                disp = disp.with_columns(
+                    pl.col("pos_open_ts").map_elements(
+                        lambda x: x.isoformat() if x is not None else "",
+                        return_dtype=pl.Utf8,
+                    )
+                )
+            if "pos_close_ts" in disp.columns:
+                disp = disp.with_columns(
+                    pl.col("pos_close_ts").map_elements(
+                        lambda x: x.isoformat() if x is not None else "",
+                        return_dtype=pl.Utf8,
+                    )
+                )
+            headers = disp.columns
+            rows = [[row.get(col) for col in headers] for row in disp.to_dicts()]
+            table = tabulate(rows, headers=headers, tablefmt="fancy_grid", floatfmt=".4f")
+            print(f"\nPositions Ledger:\n{table}")
+        else:
+            print(f"\nPositions Ledger:\n(empty)")
+
+        # Determine CSV path behavior
+        path_arg = args.dump_positions
+        if path_arg == "__DEFAULT__":
+            csv_path = "./positions_ledger.csv"
+        elif isinstance(path_arg, str):
+            csv_path = path_arg
+        else:
+            csv_path = None
+
+        if csv_path:
+            try:
+                df_out = df.clone() if isinstance(df, pl.DataFrame) else pl.DataFrame()
+                if isinstance(df_out, pl.DataFrame) and df_out.height > 0:
+                    if "pos_open_ts" in df_out.columns:
+                        df_out = df_out.with_columns(pl.col("pos_open_ts").cast(pl.Utf8))
+                    if "pos_close_ts" in df_out.columns:
+                        df_out = df_out.with_columns(pl.col("pos_close_ts").cast(pl.Utf8))
+                df_out.write_csv(csv_path)
+                self.logger.info("Positions ledger CSV written to %s", csv_path)
+            except Exception as e:
+                self.logger.error("Failed to write positions ledger CSV: %s", e)
+    
+    def _generate_outputs(self, results, strategy_name: str, args: argparse.Namespace) -> None:
+        # Handle both Results objects and dictionaries for backward compatibility
+        if hasattr(results, 'equity_curve'):
+            # Results object
+            equity_curve = results.equity_curve
+        else:
+            # Dictionary (backward compatibility)
+            equity_curve = results["equity_curve"]
+            
+        has_data = hasattr(equity_curve, "is_empty") and not equity_curve.is_empty
+        if args.output and has_data:
+            plt.figure(figsize=(12, 6))
+            plt.plot(equity_curve["timestamp"], equity_curve["equity"])
+            plt.title(f"Portfolio Equity Curve - {strategy_name}")
+            plt.xlabel("Date")
+            plt.ylabel("Equity ($)")
+            plt.grid(True)
+            plt.savefig(args.output)
+            self.logger.info("Equity curve saved to %s", args.output)
+        if args.results_csv and has_data:
+            equity_curve.write_csv(args.results_csv)
+            self.logger.info("Results saved to %s", args.results_csv)
+        if getattr(args, "report", None):
+            self._generate_quantstats_report(
+                results, strategy_name, args.report, getattr(args, "benchmark", None)
+            )
+
+    def _generate_quantstats_report(
+        self, results, strategy_name: str, report_path: str, benchmark: str | None
+    ) -> None:
+        """Generate QuantStats report using the Results object's create_tearsheet method."""
+        try:
+            # Handle both Results objects and dictionaries for backward compatibility
+            if hasattr(results, 'create_tearsheet'):
+                # Results object - use its built-in method
+                results.create_tearsheet(
+                    title=f"{strategy_name} Performance Report",
+                    benchmark_symbol=benchmark,
+                    output_file=report_path,
+                    output_format="html"
+                )
+                self.logger.info("QuantStats report generation complete")
+            else:
+                # Dictionary (backward compatibility) - use the function
+                success = generate_quantstats_report(
+                    results=results,
+                    strategy_name=strategy_name,
+                    report_path=report_path,
+                    benchmark=benchmark,
+                    logger=self.logger,
+                )
+                if success:
+                    self.logger.info("QuantStats report generation complete")
+                else:
+                    self.logger.error("QuantStats report generation failed")
+        except Exception as e:
+            self.logger.error(f"Error generating QuantStats report: {e}")
+
 
 
 def main():
-    """CLI entry point configuring subcommands and dispatching execution."""
-    # Create the top-level parser
-    parser = argparse.ArgumentParser(description="Vegas Backtesting Engine CLI")
-    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
-
-    # Common arguments
-    common_parser = argparse.ArgumentParser(add_help=False)
-    common_parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose output"
-    )
-    common_parser.add_argument(
-        "--db-dir", type=str, default="db", help="Database directory"
-    )
-    common_parser.add_argument(
-        "--timezone",
-        type=str,
-        default="US/Eastern",
-        help="Timezone for data (e.g., UTC, US/Eastern, Europe/London)",
-    )
-
-    # Run command
-    run_parser = subparsers.add_parser(
-        "run", parents=[common_parser], help="Run a backtest"
-    )
-    run_parser.add_argument("strategy_file", type=str, help="Strategy file to run")
-    run_parser.add_argument("--data-file", type=str, help="Data file to use")
-    run_parser.add_argument("--data-dir", type=str, help="Data directory to use")
-    run_parser.add_argument(
-        "--file-pattern", type=str, default="*.csv", help="File pattern for data files"
-    )
-    run_parser.add_argument(
-        "--start", dest="start_date", type=parse_date, help="Start date (YYYY-MM-DD)"
-    )
-    run_parser.add_argument(
-        "--end", dest="end_date", type=parse_date, help="End date (YYYY-MM-DD)"
-    )
-    run_parser.add_argument(
-        "--capital", type=float, default=100000.0, help="Initial capital"
-    )
-    run_parser.add_argument(
-        "--output", type=str, help="Output file for equity curve chart"
-    )
-    run_parser.add_argument("--results-csv", type=str, help="Save results to CSV file")
-    run_parser.add_argument("--report", type=str, help="Generate QuantStats report")
-    run_parser.add_argument("--benchmark", type=str, help="Benchmark symbol for report")
-    # Simulation calendar (mandatory)
-    run_parser.add_argument(
-        "--calendar",
-        type=str,
-        default="24/7",
-        help="Trading calendar name (e.g., NYSE, 24/7)",
-    )
-    # New mode flag (backtest by default). Live will route to engine.run_live but no external adapters are constructed.
-    run_parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["backtest", "live"],
-        default="backtest",
-        help="Execution mode",
-    )
-
-    # Positions dump flag: optional path argument; prints table in all cases
-    run_parser.add_argument(
-        "--dump-positions",
-        nargs="?",
-        const="__DEFAULT__",
-        help="Dump all positions (open and closed) at end of run. Optional path to write CSV",
-    )
-
-    run_parser.set_defaults(func=run_backtest)
-
-    # Ingest command
-    ingest_parser = subparsers.add_parser(
-        "ingest", parents=[common_parser], help="Ingest data into the database"
-    )
-    ingest_source = ingest_parser.add_mutually_exclusive_group(required=True)
-    ingest_source.add_argument("--file", type=str, help="Data file to ingest")
-    ingest_source.add_argument("--directory", type=str, help="Data directory to ingest")
-    ingest_parser.add_argument(
-        "--pattern", type=str, default="*.csv", help="File pattern for data files"
-    )
-    ingest_parser.add_argument(
-        "--max-files", type=int, help="Maximum number of files to ingest"
-    )
-    ingest_parser.set_defaults(func=ingest_data)
-
-    # Ingest OHLCV command
-    ohlcv_parser = subparsers.add_parser(
-        "ingest-ohlcv", parents=[common_parser], help="Ingest OHLCV data"
-    )
-    ohlcv_source = ohlcv_parser.add_mutually_exclusive_group(required=True)
-    ohlcv_source.add_argument("--file", type=str, help="OHLCV file to ingest")
-    ohlcv_source.add_argument(
-        "--directory", type=str, help="Directory with OHLCV files"
-    )
-    ohlcv_parser.add_argument(
-        "--max-files", type=int, help="Maximum number of files to ingest"
-    )
-    ohlcv_parser.set_defaults(func=ingest_ohlcv)
-
-    # DB status command
-    status_parser = subparsers.add_parser(
-        "db-status", parents=[common_parser], help="Show database status"
-    )
-    status_parser.add_argument(
-        "--detailed", action="store_true", help="Show detailed status"
-    )
-    status_parser.set_defaults(func=db_status)
-
-    # DB query command
-    query_parser = subparsers.add_parser(
-        "db-query", parents=[common_parser], help="Execute SQL query"
-    )
-    query_parser.add_argument("--query", type=str, help="SQL query to execute")
-    query_parser.add_argument(
-        "--query-file", type=str, help="File containing SQL query"
-    )
-    query_parser.add_argument(
-        "--output", type=str, help="Output file for query results"
-    )
-    query_parser.add_argument(
-        "--limit", type=int, default=100, help="Maximum rows to display"
-    )
-    query_parser.set_defaults(func=db_query)
-
-    # Delete DB command
-    delete_parser = subparsers.add_parser(
-        "delete-db", parents=[common_parser], help="Delete the database"
-    )
-    delete_parser.add_argument(
-        "--force", action="store_true", help="Force deletion without confirmation"
-    )
-    delete_parser.set_defaults(func=delete_db)
-
-    # Parse arguments
-    args = parser.parse_args()
-
-    # Set up centralized logging configuration
-    # This needs to happen BEFORE any modules/libraries are imported that might set up their own handlers
-    log_level = (
-        logging.DEBUG if hasattr(args, "verbose") and args.verbose else logging.INFO
-    )
-
-    # Remove any existing handlers from the root logger to avoid duplicate messages
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-
-    # Configure logging
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler()],
-    )
-
-    # Execute command
-    if hasattr(args, "func"):
-        sys.exit(args.func(args))
-    else:
-        parser.print_help()
-        sys.exit(1)
+    """CLI entry point delegating to the object-oriented CLI class."""
+    cli = VegasCLI()
+    exit_code = cli.run()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

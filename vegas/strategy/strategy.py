@@ -79,8 +79,9 @@ class Context:
         # Commission model configured by the strategy (defaults applied by engine/broker if not set)
         self._commission_model = None
 
-        # Expose a commission helper namespace to strategies:
+        # Expose helper namespaces to strategies (Zipline-like):
         # usage: context.set_commission(commission.PerShare(...))
+        #        context.set_slippage(slippage.Fixed(...))
         try:
             from vegas.broker.commission import (
                 commission as _commission_ns,  # lazy import
@@ -89,6 +90,15 @@ class Context:
             self.commission = _commission_ns
         except Exception:
             self.commission = None
+
+        # Slippage model configured by the strategy (defaults applied by broker if not set)
+        self._slippage_model = None
+        try:
+            from vegas.broker.slippage import slippage as _slippage_ns  # lazy import
+
+            self.slippage = _slippage_ns
+        except Exception:
+            self.slippage = None
 
     def set_portfolio(self, portfolio):
         """Set the portfolio reference (used internally by the engine).
@@ -113,6 +123,14 @@ class Context:
     def get_commission_model(self):
         """Return the configured commission model (or None if not set)."""
         return self._commission_model
+
+    def set_slippage(self, slippage_model) -> None:
+        """Set the slippage model for this strategy instance."""
+        self._slippage_model = slippage_model
+
+    def get_slippage_model(self):
+        """Return the configured slippage model (or None if not set)."""
+        return self._slippage_model
 
     @property
     def portfolio(self):

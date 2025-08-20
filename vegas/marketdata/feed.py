@@ -69,16 +69,22 @@ class HistoricalFeedAdapter(MarketDataFeed):
         end: datetime,
         market_hours: Optional[tuple[str, str]] = None,
         timezone: Optional[str] = None,
+        calendar: Optional[object] = None,
     ):
         self._data_layer = data_layer
         self._symbols = symbols
         self._start = start
         self._end = end
-        self._market_hours = market_hours
-        self._timezone = timezone or getattr(data_layer, "timezone", "UTC")
+        self._market_hours = market_hours  # deprecated; kept for back-compat on adapters
+        # Honor calendar timezone if provided; else fallback
+        if calendar is not None and hasattr(calendar, "timezone"):
+            self._timezone = getattr(calendar, "timezone")
+        else:
+            self._timezone = timezone or getattr(data_layer, "timezone", "UTC")
         self._started = False
         self._stopped = False
         self._closed = False
+        self._calendar = calendar
 
         self._timestamps: List[datetime] = []
         self._partitioned: Dict[datetime, pl.DataFrame] = {}
@@ -114,6 +120,18 @@ class HistoricalFeedAdapter(MarketDataFeed):
                     cols.append(r)
             if cols:
                 market_data = market_data.select(cols)
+
+        # Apply calendar filtering if provided
+        if self._calendar is not None and not market_data.is_empty():
+            try:
+                from vegas.calendars.base import TradingCalendar  # type: ignore
+                if isinstance(self._calendar, TradingCalendar):  # type: ignore[arg-type]
+                    allowed = self._calendar.filter_timestamps(
+                        market_data.get_column("timestamp")
+                    )
+                    market_data = market_data.filter(pl.col("timestamp").is_in(allowed))
+            except Exception:
+                pass
 
         # Prepare per-timestamp grouping equivalent to engine expectations
         if market_data.is_empty():

@@ -41,12 +41,12 @@ class DataLayer:
         self.date_range = None  # Tuple of (start_date, end_date)
         self.timezone = timezone  # Store the timezone for timestamp conversions
 
-        # Validate timezone
+        # Validate timezone; do not silently change away from calendar-provided tz
         try:
-            pytz.timezone(timezone)
+            pytz.timezone(self.timezone)
         except pytz.exceptions.UnknownTimeZoneError:
-            self.logger.warning(f"Unknown timezone: {timezone}, falling back to EST")
-            self.timezone = "EST"
+            self.logger.warning(f"Unknown timezone: {self.timezone}, falling back to UTC")
+            self.timezone = "UTC"
 
         self.logger.info(f"DataLayer initialized with timezone: {self.timezone}")
 
@@ -416,8 +416,8 @@ class DataLayer:
         self,
         start: datetime,
         end: datetime,
-        symbols: List[str] = None,
-        market_hours: tuple = None,
+        symbols: Optional[List[str]] = None,
+        market_hours: Optional[tuple] = None,
     ) -> pl.DataFrame:
         """Get data for a backtest period.
 

@@ -9,6 +9,7 @@ from vegas.broker.broker import (
     Transaction,
 )
 from vegas.broker.commission import (
+    commission,
     CommissionModel,
     FixedCommissionModel,
     PerShareCommissionModel,
@@ -16,9 +17,11 @@ from vegas.broker.commission import (
 from vegas.broker.ibkr_adapter import (
     InteractiveBrokersBrokerAdapter as InteractiveBrokersBroker,
 )
-from vegas.broker.slippage import FixedSlippageModel, SlippageModel, VolumeSlippageModel
+from vegas.broker.slippage import slippage, FixedSlippageModel, SlippageModel, VolumeSlippageModel
 
 __all__ = [
+    "commission",
+    "slippage",
     "Broker",
     "Order",
     "OrderStatus",
