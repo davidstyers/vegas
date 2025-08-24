@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import polars as pl
 
 
 @dataclass
@@ -200,3 +201,34 @@ class Strategy:
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:
         """Hook called at the end of the backtest for custom analysis (optional)."""
         pass
+
+    def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+        """
+        Given time index `t` and historical OHLCV data up to `t`,
+        return a dict mapping asset → continuous signal.
+
+        This method is used by signal research mode to evaluate predictive power
+        of strategy-generated signals without running a full backtest.
+
+        :param t: Time index in the backtesting timeline
+        :type t: int
+        :param data: Dict mapping asset symbols to Polars DataFrames with historical OHLCV data
+        :type data: Dict[str, pl.DataFrame]
+        :returns: Dict mapping asset symbols to continuous signal values
+        :rtype: Dict[str, float]
+        
+        Example:
+            >>> def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+            ...     signals = {}
+            ...     for symbol, df in data.items():
+            ...         # Generate signal based on historical data
+            ...         if df.height > 0:
+            ...             signals[symbol] = 0.5  # Example signal
+            ...     return signals
+        
+        Returns:
+            Continuous scores for each asset (positive=bullish, negative=bearish).
+            For assets not tradable at time `t`, return no entry (engine fills with null).
+            Must be compatible with both single-asset and multi-asset universes.
+        """
+        return {}

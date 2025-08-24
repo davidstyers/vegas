@@ -431,6 +431,99 @@ class BacktestEngine:
 
         return results
 
+    def generate_signals(
+        self,
+        start: datetime,
+        end: datetime,
+        strategy: Strategy,
+    ) -> pl.DataFrame:
+        """
+        Iterate through time, call strategy.predict(),
+        collect results into a Polars DataFrame with:
+            - one row per timestamp
+            - one column per asset
+            - 'datetime' column as primary key
+
+        This method is used by signal research mode to evaluate predictive power
+        of strategy-generated signals without running a full backtest.
+
+        :param start: Inclusive start datetime for the signal generation window.
+        :type start: datetime
+        :param end: Inclusive end datetime for the signal generation window.
+        :type end: datetime
+        :param strategy: Strategy instance implementing the predict() method.
+        :type strategy: Strategy
+        :returns: Polars DataFrame with datetime column and one column per asset
+        :rtype: pl.DataFrame
+        :Example:
+            >>> signals_df = engine.generate_signals(start, end, my_strategy)
+            >>> print(signals_df.columns)  # ['datetime', 'AAPL', 'MSFT', ...]
+        """
+        self._logger.info(f"Generating signals from {start} to {end}")
+        
+        # Store the strategy
+        self.strategy = strategy
+        
+        # Prepare market data (same as in run method)
+        timestamp_index = self._prepare_market_data(start, end)
+        
+        if timestamp_index is None or len(timestamp_index) == 0:
+            self._logger.warning("No timestamp index available for signal generation")
+            return pl.DataFrame({"datetime": []})
+            
+        # Get all symbols in the universe
+        symbols = self.data_portal.get_symbols()
+        if not symbols:
+            self._logger.warning("No symbols available for signal generation")
+            return pl.DataFrame({"datetime": []})
+            
+        # Initialize the signals collection structure
+        signals_data = {"datetime": []}
+        for symbol in symbols:
+            signals_data[symbol] = []
+            
+        timestamps = timestamp_index.to_list()
+        
+        # Iterate through each timestamp
+        for t, timestamp in enumerate(timestamps):
+            self.data_portal.set_current_dt(timestamp)
+            
+            # Prepare historical data for the strategy predict method
+            data_dict = {}
+            for symbol in symbols:
+                # Get historical data up to current timestamp for this symbol
+                historical_data = self.data_portal.history(
+                    assets=[symbol],
+                    bar_count=100,  # Provide reasonable window of historical data
+                    frequency="1h",
+                    end_dt=timestamp
+                )
+                if not historical_data.is_empty():
+                    data_dict[symbol] = historical_data
+                    
+            # Call the strategy's predict method
+            try:
+                signal_dict = strategy.predict(t, data_dict)
+            except Exception as e:
+                self._logger.warning(f"Strategy predict failed at {timestamp}: {e}")
+                signal_dict = {}
+                
+            # Collect signals into our structure
+            signals_data["datetime"].append(timestamp)
+            
+            for symbol in symbols:
+                if symbol in signal_dict:
+                    signals_data[symbol].append(signal_dict[symbol])
+                else:
+                    # Fill with None for assets not in universe at time t
+                    signals_data[symbol].append(None)
+                    
+        # Create the DataFrame
+        result_df = pl.DataFrame(signals_data)
+        
+        self._logger.info(f"Generated signals for {len(timestamps)} timestamps and {len(symbols)} symbols")
+        return result_df
+
     def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
         """Load and prepare data; return the unified timestamp index.
 
