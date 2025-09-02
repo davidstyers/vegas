@@ -66,11 +66,11 @@ class MyStrategy(Strategy):
         )
 
         # Attach the pipeline to the engine
-        context._engine.attach_pipeline(pipe, 'my_pipeline')
+        context.engine.attach_pipeline(pipe, 'my_pipeline')
 
     def before_trading_start(self, context, data):
         # Get the pipeline results for today
-        results = context._engine.pipeline_output('my_pipeline')
+        results = context.engine.pipeline_output('my_pipeline')
 
         # Use results to set up trading signals
         stocks_with_positive_returns = results[results['daily_returns'] > 0]

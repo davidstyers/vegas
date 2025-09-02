@@ -460,68 +460,148 @@ class BacktestEngine:
             >>> print(signals_df.columns)  # ['datetime', 'AAPL', 'MSFT', ...]
         """
         self._logger.info(f"Generating signals from {start} to {end}")
-        
-        # Store the strategy
+
+        # Initialize strategy and portfolio
         self.strategy = strategy
-        
-        # Prepare market data (same as in run method)
-        timestamp_index = self._prepare_market_data(start, end)
-        
+        context = self.strategy.context
+        context.set_engine(
+            self
+        )  # Allow strategies to access engine helpers like pipelines
+
+        # Load data explicitly for signal generation (don't rely on strategy universe)
+        timestamp_index: pl.Series = self._prepare_signal_generation_data(start, end)
+
         if timestamp_index is None or len(timestamp_index) == 0:
             self._logger.warning("No timestamp index available for signal generation")
             return pl.DataFrame({"datetime": []})
-            
-        # Get all symbols in the universe
-        symbols = self.data_portal.get_symbols()
-        if not symbols:
-            self._logger.warning("No symbols available for signal generation")
+
+        # Initialize strategy
+        self.strategy.initialize(context)
+
+        trading_date_series = (
+            pl.DataFrame({"timestamp": timestamp_index})
+            .select(pl.col("timestamp").dt.date().alias("date"))
+            .unique()
+            .sort("date")
+            .get_column("date")
+        )
+        if trading_date_series.len() == 0:
+            self._logger.warning("No data available for the specified period")
             return pl.DataFrame({"datetime": []})
-            
+
+        unique_dates: List[datetime.date] = trading_date_series.to_list()
+        self._logger.info(f"Processing {len(unique_dates)} trading days")
+
         # Initialize the signals collection structure
         signals_data = {"datetime": []}
-        for symbol in symbols:
-            signals_data[symbol] = []
+        all_symbols = set()  # Track all symbols we've seen
+
+        # Process data day by day
+        for current_date in unique_dates:
+            # Clear previous pipeline results so strategies see fresh daily outputs.
+            self._pipeline_results = {}
+
+            # Find the first available timestamp for this date for pipeline execution
+            # Pipeline needs historical data ending at a valid market time, not midnight
+            daily_timestamps = [ts for ts in timestamp_index if ts.date() == current_date]
+            if daily_timestamps:
+                # Use the first available market timestamp for this date
+                pipeline_dt = daily_timestamps[0]
+            else:
+                # Fallback to midnight if no timestamps found (shouldn't happen)
+                pipeline_dt = datetime.combine(current_date, datetime.min.time())
             
-        timestamps = timestamp_index.to_list()
-        
-        # Iterate through each timestamp
-        for t, timestamp in enumerate(timestamps):
-            self.data_portal.set_current_dt(timestamp)
-            
-            # Prepare historical data for the strategy predict method
-            data_dict = {}
-            for symbol in symbols:
-                # Get historical data up to current timestamp for this symbol
-                historical_data = self.data_portal.history(
-                    assets=[symbol],
-                    bar_count=100,  # Provide reasonable window of historical data
-                    frequency="1h",
-                    end_dt=timestamp
-                )
-                if not historical_data.is_empty():
-                    data_dict[symbol] = historical_data
-                    
-            # Call the strategy's predict method
-            try:
-                signal_dict = strategy.predict(t, data_dict)
-            except Exception as e:
-                self._logger.warning(f"Strategy predict failed at {timestamp}: {e}")
-                signal_dict = {}
+            context.current_ts = pipeline_dt
+            self.data_portal.set_current_dt(context.current_ts)
+            self._logger.info(f"Set data portal current_dt to {context.current_ts} for pipeline execution")
+
+            # Compute any attached pipelines for this day
+            for name, pipeline in self.attached_pipelines.items():
+                try:
+                    # Run pipeline for just this date. Many ranking/screening pipelines operate daily.
+                    pipeline_result = self.pipeline_engine.run_pipeline(
+                        pipeline,
+                        start_date=context.current_ts,
+                        end_date=context.current_ts,
+                    )
+                    if pipeline_result.height > 0:
+                        # Expose results via pipeline_output for the strategy to consume.
+                        self._pipeline_results[name] = pipeline_result
+                        self._logger.debug(
+                            f"Pipeline '{name}' computed {len(pipeline_result)} results for {current_date}"
+                        )
+                    else:
+                        self._logger.warning(
+                            f"Pipeline '{name}' returned empty results for {current_date}"
+                        )
+                except Exception as e:
+                    self._logger.warning(f"Pipeline '{name}' failed for {current_date}: {e}")
+
+            # Call before_trading_start at the beginning of each day
+            if hasattr(self.strategy, "before_trading_start"):
+                self.strategy.before_trading_start(context, self.data_portal)
+
+            # Determine the day's timestamp sequence from the unified index.
+            day_timestamp_series = (
+                pl.DataFrame({"timestamp": timestamp_index})
+                .with_columns(pl.col("timestamp").dt.date().alias("date"))
+                .filter(pl.col("date") == current_date)
+                .select("timestamp")
+                .get_column("timestamp")
+            )
+            iter_timestamps: List[datetime] = day_timestamp_series.to_list()
+
+            # Process each timestamp chronologically
+            for timestamp in iter_timestamps:
+                self.data_portal.set_current_dt(timestamp)
+                context.current_ts = timestamp
+
+                # Call strategy predict method to generate signals
+                signals = {}
+                if hasattr(self.strategy, "predict"):
+                    try:
+                        signals = self.strategy.predict(context, self.data_portal)
+                        if signals is None:
+                            signals = {}
+                    except Exception as e:
+                        self._logger.warning(f"Strategy predict failed at {timestamp}: {e}")
+                        signals = {}
+
+                # Track all symbols we've encountered
+                all_symbols.update(signals.keys())
                 
-            # Collect signals into our structure
-            signals_data["datetime"].append(timestamp)
-            
-            for symbol in symbols:
-                if symbol in signal_dict:
-                    signals_data[symbol].append(signal_dict[symbol])
-                else:
-                    # Fill with None for assets not in universe at time t
-                    signals_data[symbol].append(None)
+                # Collect signals into our structure
+                signals_data["datetime"].append(timestamp)
+                
+                # Initialize symbol columns if we haven't seen them before
+                for symbol in signals.keys():
+                    if symbol not in signals_data:
+                        # Backfill with None for previous timestamps
+                        signals_data[symbol] = [None] * (len(signals_data["datetime"]) - 1)
+
+                # Add current signals and None for missing symbols
+                for symbol in all_symbols:
+                    if symbol not in signals_data:
+                        signals_data[symbol] = [None] * len(signals_data["datetime"])
                     
+                    if symbol in signals:
+                        signals_data[symbol].append(signals[symbol])
+                    else:
+                        signals_data[symbol].append(None)
+
+        # Ensure all symbol columns have the same length
+        for symbol in all_symbols:
+            if symbol in signals_data:
+                while len(signals_data[symbol]) < len(signals_data["datetime"]):
+                    signals_data[symbol].append(None)
+                        
         # Create the DataFrame
+        if not signals_data["datetime"]:
+            return pl.DataFrame({"datetime": []})
+            
         result_df = pl.DataFrame(signals_data)
         
-        self._logger.info(f"Generated signals for {len(timestamps)} timestamps and {len(symbols)} symbols")
+        self._logger.info(f"Generated signals for {len(signals_data['datetime'])} timestamps and {len(all_symbols)} symbols")
         return result_df
 
     def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
@@ -604,6 +684,93 @@ class BacktestEngine:
 
         # Build and return the timestamp index from the cache.
         return self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
+
+    def _prepare_signal_generation_data(self, start: datetime, end: datetime) -> pl.Series:
+        """Load and prepare data for signal generation; return the unified timestamp index.
+        
+        Unlike _prepare_market_data, this method loads all available symbols to ensure
+        pipelines have data to work with, regardless of strategy universe settings.
+
+        :param start: Inclusive start datetime for the signal generation window.
+        :type start: datetime
+        :param end: Inclusive end datetime for the signal generation window.
+        :type end: datetime
+        :returns: Unified timestamp index as a Polars Series.
+        :rtype: polars.Series
+        """
+        # Frequencies to materialize. Default to 1h for a balanced intraday cadence.
+        frequency_set: Set[str] = {"1h"}
+        preload_start: datetime = start
+        
+        # Compute preload window from attached pipelines
+        # Note: At signal generation time, pipelines may not be attached yet since 
+        # strategy.initialize() hasn't been called. We need to ensure common frequencies are loaded.
+        frequency_set.add("1d")  # Add daily frequency for pipelines that typically use daily data
+        
+        try:
+            for pipeline in getattr(self, "attached_pipelines", {}).values():
+                freq: Optional[str] = getattr(pipeline, "frequency", None)
+                if isinstance(freq, str) and freq:
+                    frequency_set.add(freq)
+                try:
+                    max_window = self.pipeline_engine._get_max_window_length(pipeline)
+                except Exception:
+                    max_window = 0
+                if max_window and max_window > 0:
+                    if freq == "1d":
+                        candidate = start - timedelta(days=int(max_window))
+                    elif freq == "1h":
+                        candidate = start - timedelta(hours=int(max_window))
+                    else:
+                        candidate = start - timedelta(hours=int(max_window))
+                    if candidate < preload_start:
+                        preload_start = candidate
+        except Exception:
+            pass
+
+        # Resolve calendar and propagate timezone to data components
+        cal = get_calendar(getattr(self, "_calendar_name", "24/7"))
+        try:
+            # Align engine and data layer/portal timezones to the calendar's timezone
+            self.timezone = getattr(cal, "timezone", self.timezone)
+            if hasattr(self.data_layer, "timezone"):
+                self.data_layer.timezone = self.timezone
+            if hasattr(self.data_portal, "timezone"):
+                self.data_portal.timezone = self.timezone
+        except Exception:
+            pass
+
+        # Load data for ALL available symbols (symbols=None means all available)
+        # This ensures pipelines have data to work with regardless of strategy universe
+        self._logger.info(f"Loading data for signal generation: {preload_start} to {end}, frequencies: {sorted(frequency_set)}")
+        self.data_portal.load_data(
+            start_date=preload_start,
+            end_date=end,
+            symbols=None,  # Load all available symbols
+            frequencies=sorted(frequency_set),
+            calendar=cal,
+        )
+        self._logger.info("Data loading completed for signal generation")
+        
+        # Check what symbols are available after loading
+        try:
+            available_symbols = self.data_portal.get_symbols()
+            self._logger.info(f"Available symbols after loading: {len(available_symbols) if available_symbols else 0}")
+            if available_symbols:
+                self._logger.info(f"Sample symbols: {available_symbols[:10]}")
+        except Exception as e:
+            self._logger.warning(f"Could not get available symbols: {e}")
+
+        # Build and return the timestamp index from the cache.
+        timestamp_index = self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
+        self._logger.info(f"Generated timestamp index with {len(timestamp_index) if timestamp_index is not None else 0} timestamps")
+        
+        # Debug: Show sample timestamps to understand data availability
+        if timestamp_index is not None and len(timestamp_index) > 0:
+            sample_timestamps = timestamp_index.head(5).to_list()
+            self._logger.info(f"Sample timestamps: {sample_timestamps}")
+        
+        return timestamp_index
 
     def _run_backtest(
         self,

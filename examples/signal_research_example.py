@@ -31,14 +31,20 @@ class MeanReversionStrategy(Strategy):
         self.z_threshold = z_threshold
         self.universe = ["AAPL", "MSFT", "TSLA"]
     
-    def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+    def predict(self, context, data_portal) -> Dict[str, float]:
         """Generate mean reversion signals."""
         signals = {}
         
-        for symbol, df in data.items():
-            if df.height >= self.lookback_window:
+        # Get universe from strategy attributes or data portal
+        symbols = getattr(self, 'universe', data_portal.get_symbols())
+        
+        for symbol in symbols:
+            # Get historical data for this symbol
+            hist_data = data_portal.history(assets=[symbol], bar_count=self.lookback_window + 5)
+            
+            if not hist_data.is_empty() and hist_data.height >= self.lookback_window:
                 # Get recent close prices
-                close_prices = df.select("close").to_series().to_list()
+                close_prices = hist_data.select("close").to_series().to_list()
                 recent_prices = close_prices[-self.lookback_window:]
                 
                 # Calculate rolling statistics

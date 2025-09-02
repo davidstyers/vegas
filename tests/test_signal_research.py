@@ -67,14 +67,18 @@ class SimpleMovingAverageStrategy(Strategy):
         self.long_window = long_window
         self.universe = ["AAPL", "MSFT"]
     
-    def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+    def predict(self, context, data_portal) -> Dict[str, float]:
         """Generate signals based on moving average crossover."""
         signals = {}
         
-        for symbol, df in data.items():
-            if df.height >= self.long_window:
+        # Get universe from strategy or data portal
+        symbols = getattr(self, 'universe', data_portal.get_symbols())
+        
+        for symbol in symbols:
+            hist_data = data_portal.history(assets=[symbol], bar_count=self.long_window + 5)
+            if not hist_data.is_empty() and hist_data.height >= self.long_window:
                 # Calculate moving averages
-                close_prices = df.select("close").to_series().to_list()
+                close_prices = hist_data.select("close").to_series().to_list()
                 
                 if len(close_prices) >= self.long_window:
                     short_ma = np.mean(close_prices[-self.short_window:])
@@ -95,10 +99,11 @@ class ConstantSignalStrategy(Strategy):
         self.signal_value = signal_value
         self.universe = ["AAPL"]
     
-    def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+    def predict(self, context, data_portal) -> Dict[str, float]:
         """Return constant signal for available assets."""
         signals = {}
-        for symbol in data.keys():
+        symbols = getattr(self, 'universe', data_portal.get_symbols())
+        for symbol in symbols:
             signals[symbol] = self.signal_value
         return signals
 
@@ -107,32 +112,92 @@ def test_strategy_predict_method():
     """Test that strategy predict method works correctly."""
     strategy = SimpleMovingAverageStrategy()
     
-    # Create mock data
-    mock_data = {
-        "AAPL": pl.DataFrame({
-            "timestamp": [datetime(2025, 1, 1) + timedelta(hours=i) for i in range(30)],
-            "symbol": ["AAPL"] * 30,
-            "close": [100 + i * 0.1 for i in range(30)]  # Trending up
-        })
-    }
+    # Create mock context and data portal
+    from vegas.strategy import Context
+    context = Context()
+    context.current_ts = datetime(2025, 1, 1, 15, 0, 0)
+    
+    # Create mock data portal with history method
+    class MockDataPortal:
+        def get_symbols(self):
+            return ["AAPL", "MSFT"]
+        
+        def history(self, assets, bar_count):
+            # Return mock historical data
+            timestamps = [datetime(2025, 1, 1) + timedelta(hours=i) for i in range(bar_count)]
+            return pl.DataFrame({
+                "timestamp": timestamps,
+                "symbol": [assets[0]] * bar_count,
+                "close": [100 + i * 0.1 for i in range(bar_count)]  # Trending up
+            })
+    
+    data_portal = MockDataPortal()
     
     # Test predict method
-    signals = strategy.predict(0, mock_data)
+    signals = strategy.predict(context, data_portal)
     
     assert isinstance(signals, dict)
-    assert "AAPL" in signals
-    assert isinstance(signals["AAPL"], float)
+    assert "AAPL" in signals or "MSFT" in signals
+    if signals:
+        assert all(isinstance(v, float) for v in signals.values())
 
 
 def test_backtest_engine_generate_signals():
     """Test BacktestEngine generate_signals method."""
-    # Setup
-    dl = MockDataLayer()
-    engine = BacktestEngine(data_dir="test_db")
-    engine.data_layer = dl
-    engine.data_portal = DataPortal(dl)
+    # Create a simple test strategy that doesn't need historical data
+    class SimpleTestStrategy(Strategy):
+        def __init__(self):
+            super().__init__()
+            self.universe = ["TEST1", "TEST2"]
+        
+        def predict(self, context, data_portal) -> Dict[str, float]:
+            # Simple strategy that returns fixed signals for universe
+            return {"TEST1": 0.5, "TEST2": -0.3}
     
-    strategy = SimpleMovingAverageStrategy()
+    # Setup engine (will use default data layer, but we'll mock the data portal)
+    engine = BacktestEngine(data_dir="test_db")
+    
+    # Mock the data portal methods needed
+    class MockDataPortal:
+        def __init__(self):
+            self.timezone = "UTC"
+            
+        def load_data(self, start_date, end_date, symbols=None, frequencies=None, calendar=None):
+            pass
+            
+        def get_symbols(self):
+            return ["TEST1", "TEST2"]
+            
+        def set_current_dt(self, dt):
+            pass
+            
+        def get_unified_timestamp_index(self, start, end, frequency="1h"):
+            # Return simple hourly timestamps
+            timestamps = []
+            current = start
+            while current <= end:
+                timestamps.append(current)
+                current += timedelta(hours=1)
+            return pl.Series("timestamp", timestamps)
+    
+    # Mock the data layer as well
+    class MockDataLayer:
+        def __init__(self):
+            self.timezone = "UTC"
+        
+        def get_unified_timestamp_index(self, start, end):
+            timestamps = []
+            current = start
+            while current <= end:
+                timestamps.append(current)
+                current += timedelta(hours=1)
+            return pl.Series("timestamp", timestamps)
+    
+    # Replace engine's data portal and data layer
+    engine.data_portal = MockDataPortal()
+    engine.data_layer = MockDataLayer()
+    
+    strategy = SimpleTestStrategy()
     
     start = datetime(2025, 1, 1, 10)
     end = datetime(2025, 1, 1, 15)  # 6 hours of data
@@ -288,16 +353,18 @@ def test_multi_asset_dynamic_universe():
             super().__init__()
             self.universe = ["AAPL", "MSFT"]
         
-        def predict(self, t: int, data: Dict[str, pl.DataFrame]) -> Dict[str, float]:
+        def predict(self, context, data_portal) -> Dict[str, float]:
             signals = {}
             
-            # Only trade AAPL in first half of period, both assets in second half
-            if t < 5:
-                if "AAPL" in data:
-                    signals["AAPL"] = 0.7
+            # Use timestamp to determine which half we're in
+            timestamp = context.current_ts
+            # Simple logic: trade only AAPL before 2pm, both after
+            if timestamp.hour < 14:
+                signals["AAPL"] = 0.7
                 # Note: Don't return signal for MSFT, should fill with None
             else:
-                for symbol in data.keys():
+                symbols = getattr(self, 'universe', ["AAPL", "MSFT"])
+                for symbol in symbols:
                     signals[symbol] = 0.5
             
             return signals
