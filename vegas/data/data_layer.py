@@ -18,6 +18,8 @@ import pytz
 import zstandard as zstd
 
 from vegas.database import DatabaseManager
+from vegas.data.transform import FrequencyManager
+from vegas.data.transform.base import DataType
 
 
 class DataLayer:
@@ -210,6 +212,19 @@ class DataLayer:
             except Exception as e:
                 self.logger.error(f"Failed to ingest OHLCV file: {e}")
 
+        # Handle TBBO files for database ingestion
+        if (
+            file_path.endswith(".tbbo.csv.zst")
+            and self.use_database
+            and self.db_manager
+        ):
+            try:
+                self.db_manager.ingest_tbbo_file(file_path)
+                self._try_load_from_database()
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to ingest TBBO file: {e}")
+
         # Load the file into a DataFrame
         df = self._read_file(file_path)
 
@@ -265,6 +280,21 @@ class DataLayer:
                 return
             except Exception as e:
                 self.logger.error(f"Failed to ingest OHLCV files: {e}")
+
+        # Handle TBBO directory for database ingestion
+        if (
+            file_pattern == "*.tbbo.csv.zst"
+            and self.use_database
+            and self.db_manager
+        ):
+            try:
+                self.db_manager.ingest_tbbo_directory(
+                    directory, file_pattern, max_files
+                )
+                self._try_load_from_database()
+                return
+            except Exception as e:
+                self.logger.error(f"Failed to ingest TBBO files: {e}")
 
         # Find data files
         files = self._find_files(directory, file_pattern)
@@ -418,16 +448,23 @@ class DataLayer:
         end: datetime,
         symbols: Optional[List[str]] = None,
         market_hours: Optional[tuple] = None,
+        data_type: str = "ohlcv",
+        frequency: str = "1h",
+        limit: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Get data for a backtest period.
+        """Get data for a backtest period with optional frequency transformation.
 
         Args:
             start: Start date
             end: End date
             symbols: Optional list of symbols to include
+            market_hours: Optional market hours filter (applies only to OHLCV data)
+            data_type: Type of data to retrieve ("ohlcv" or "tick")
+            frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+            limit: Optional limit on number of rows returned (useful for tick data)
 
         Returns:
-            DataFrame with market data
+            DataFrame with market data transformed to the specified frequency
 
         """
         # Ensure start and end are timezone-aware
@@ -441,28 +478,53 @@ class DataLayer:
         # Try to get data from database first if available
         if self.use_database and self.db_manager:
             try:
-                raw = self.db_manager.get_market_data(
-                    start_date=start_ts,
-                    end_date=end_ts,
-                    symbols=symbols,
-                    timezone=self.timezone,
-                )
-                if not raw.is_empty():
-                    if market_hours:
-                        start_m = _time_str_to_minutes(market_hours[0])
-                        end_m = _time_str_to_minutes(market_hours[1])
-                        result = raw.filter(
-                            (
-                                pl.col("timestamp").dt.hour().cast(pl.Int32) * 60
-                                + pl.col("timestamp").dt.minute().cast(pl.Int32)
-                            ).is_between(start_m, end_m, closed="left")
-                        )
-                    else:
-                        result = raw
-                    self.data = result
-                    return result
+                if data_type.lower() == "tick":
+                    # Get tick data
+                    raw = self.db_manager.get_tick_data(
+                        start_date=start_ts,
+                        end_date=end_ts,
+                        symbols=symbols,
+                        timezone=self.timezone,
+                        limit=limit,
+                    )
+                    # Note: market_hours filtering is not applied to tick data
+                    # as tick data is typically used for high-frequency analysis
+                    if not raw.is_empty():
+                        # Apply frequency transformations if needed
+                        result = self._apply_frequency_transform(raw, frequency, data_type)
+                        
+                        self.data = result
+                        return result
+                else:
+                    # Get OHLCV market data (default)
+                    raw = self.db_manager.get_market_data(
+                        start_date=start_ts,
+                        end_date=end_ts,
+                        symbols=symbols,
+                        timezone=self.timezone,
+                    )
+                    if not raw.is_empty():
+                        if market_hours:
+                            start_m = _time_str_to_minutes(market_hours[0])
+                            end_m = _time_str_to_minutes(market_hours[1])
+                            result = raw.filter(
+                                (
+                                    pl.col("timestamp").dt.hour().cast(pl.Int32) * 60
+                                    + pl.col("timestamp").dt.minute().cast(pl.Int32)
+                                ).is_between(start_m, end_m, closed="left")
+                            )
+                        else:
+                            result = raw
+                        
+                        # Apply frequency transformations if needed
+                        self.logger.info(f"Before transformation: {result.height} rows")
+                        result = self._apply_frequency_transform(result, frequency, data_type)
+                        self.logger.info(f"After transformation: {result.height} rows")
+                        
+                        self.data = result
+                        return result
             finally:
-                self.logger.debug("Data loaded from database")
+                self.logger.debug(f"Data loaded from database (type: {data_type})")
 
         # No data available
         return pl.DataFrame()
@@ -658,6 +720,95 @@ class DataLayer:
         except Exception as e:
             self.logger.error(f"OHLCV directory ingestion failed: {e}")
             return 0
+
+    def ingest_tbbo_file(self, file_path: str) -> int:
+        """Ingest a TBBO file into the database."""
+        if not self.use_database or self.db_manager is None:
+            self.logger.warning("Database not available for ingestion")
+            return 0
+
+        try:
+            rows_affected = self.db_manager.ingest_tbbo_file(file_path)
+            self.logger.info(f"Ingested {rows_affected} rows from TBBO file")
+            return rows_affected
+        except Exception as e:
+            self.logger.error(f"TBBO file ingestion failed: {e}")
+            return 0
+
+    def ingest_tbbo_directory(self, directory: str, max_files: int = None) -> int:
+        """Ingest TBBO files from a directory into the database."""
+        if not self.use_database or self.db_manager is None:
+            self.logger.warning("Database not available for ingestion")
+            return 0
+
+        try:
+            rows_affected = self.db_manager.ingest_tbbo_directory(
+                directory=directory, pattern="*.tbbo.csv.zst", max_files=max_files
+            )
+            self.logger.info(f"Ingested {rows_affected} rows from TBBO directory")
+            return rows_affected
+        except Exception as e:
+            self.logger.error(f"TBBO directory ingestion failed: {e}")
+            return 0
+
+    def _apply_frequency_transform(self, df: pl.DataFrame, frequency: str, data_type: str) -> pl.DataFrame:
+        """Apply frequency transformation to data.
+        
+        Args:
+            df: Input DataFrame
+            frequency: Frequency specification (e.g., "1h", "tick:1000", "volume:5000")
+            data_type: Type of data ("ohlcv", "tick", "tbbo")
+            
+        Returns:
+            Transformed DataFrame
+        """
+        if df.is_empty():
+            return df
+            
+        try:
+            # Check if we have a stored frequency spec from the engine
+            if hasattr(self, '_engine_frequency_spec'):
+                freq_spec = self._engine_frequency_spec
+                self.logger.info(f"Using stored frequency spec from engine: {freq_spec}")
+            else:
+                # Parse frequency specification
+                freq_spec = FrequencyManager.parse_frequency(frequency, DataType(data_type))
+                self.logger.info(f"Parsed frequency '{frequency}' with data_type '{data_type}' -> {freq_spec}")
+            
+            # Get the appropriate transformer
+            transformer_class = FrequencyManager.get_transformer_class(freq_spec)
+            self.logger.info(f"Got transformer class: {transformer_class}")
+            
+            if transformer_class is None:
+                self.logger.warning(f"No transformer found for frequency: {frequency}")
+                return df
+                
+            # For time-based frequencies, check if transformation is needed
+            if freq_spec.frequency_type.name == "TIME":
+                # If it's already the right frequency or default, return as-is
+                if frequency in ["1h", "1H"] and data_type == "ohlcv":
+                    return df
+                    
+                # Otherwise apply resampling
+                transformer = transformer_class(target_frequency=freq_spec.value)
+            else:
+                # For bar-based frequencies, use the bar size
+                transformer = transformer_class(bar_size=freq_spec.value)
+                
+            # Apply transformation
+            transformed_df = transformer.transform(df)
+            
+            self.logger.debug(f"Applied {freq_spec.frequency_type.value} transformation: {df.height} -> {transformed_df.height} rows")
+            
+            return transformed_df
+            
+        except Exception as e:
+            self.logger.error(f"Error applying frequency transformation: {e}")
+            # For tick data, if transformation fails, return the raw data
+            if data_type == "tick":
+                self.logger.warning(f"Returning raw tick data due to transformation failure")
+            # Return original data if transformation fails
+            return df
 
     def close(self) -> None:
         """Close database connections."""

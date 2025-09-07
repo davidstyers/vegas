@@ -122,11 +122,11 @@ class ParquetManager:
 
         # Make a copy of the dataframe to preserve partition columns in the data
         # This helps prevent schema mismatches when partition schemes change
-        write_df = df.copy()
+        write_df = df.clone()
 
         # Ensure schema consistency by keeping partition columns in the data
         # Note that PyArrow will still use these for partitioning but also keep them in the data
-        table = pa.Table.from_pandas(write_df)
+        table = write_df.to_arrow()
         pq.write_to_dataset(
             table,
             partition_path,
@@ -397,6 +397,9 @@ class DatabaseManager:
 
             # Create market data view
             self._create_market_data_view()
+            
+            # Create tick data view
+            self._create_tick_data_view()
 
             self.logger.info("Database schema initialized successfully")
         except Exception as e:
@@ -485,7 +488,68 @@ class DatabaseManager:
         WHERE FALSE
         """
         )
-        self.logger.info("Created empty market_data view")
+
+    def _create_tick_data_view(self) -> None:
+        """Create or replace the `tick_data` view for TBBO data."""
+        partitioned_dir = os.path.join(self.parquet_dir, "tick_partitioned")
+        
+        # Check if partitioned tick data exists
+        if os.path.exists(partitioned_dir) and glob.glob(
+            os.path.join(partitioned_dir, "**", "*.parquet"), recursive=True
+        ):
+            try:
+                # Ensure absolute path with proper escaping
+                abs_partitioned_dir = os.path.abspath(partitioned_dir).replace("\\", "/")
+
+                # Try to create view over real data
+                self.conn.execute(
+                    f"""
+                CREATE OR REPLACE VIEW tick_data AS
+                SELECT
+                    timestamp::TIMESTAMP as timestamp,
+                    symbol::VARCHAR as symbol,
+                    side::VARCHAR as side,
+                    price::DOUBLE as price,
+                    size::DOUBLE as size,
+                    bid_price::DOUBLE as bid_price,
+                    ask_price::DOUBLE as ask_price,
+                    bid_size::DOUBLE as bid_size,
+                    ask_size::DOUBLE as ask_size,
+                    bid_count::INTEGER as bid_count,
+                    ask_count::INTEGER as ask_count
+                FROM parquet_scan('{abs_partitioned_dir}/**/*.parquet', UNION_BY_NAME=TRUE)
+                """
+                )
+                self.logger.info(f"Created tick_data view over {abs_partitioned_dir}")
+            except Exception as e:
+                self.logger.error(f"Failed to create tick_data view over partitioned data: {e}")
+                # Create empty view as fallback
+                self._create_empty_tick_data_view()
+        else:
+            # No partitioned tick data yet, create empty view
+            self._create_empty_tick_data_view()
+
+    def _create_empty_tick_data_view(self) -> None:
+        """Create an empty `tick_data` view with a stable schema."""
+        self.conn.execute(
+            """
+        CREATE OR REPLACE VIEW tick_data AS
+        SELECT
+            CAST(NULL AS TIMESTAMP) as timestamp,
+            CAST(NULL AS VARCHAR) as symbol,
+            CAST(NULL AS VARCHAR) as side,
+            CAST(NULL AS DOUBLE) as price,
+            CAST(NULL AS DOUBLE) as size,
+            CAST(NULL AS DOUBLE) as bid_price,
+            CAST(NULL AS DOUBLE) as ask_price,
+            CAST(NULL AS DOUBLE) as bid_size,
+            CAST(NULL AS DOUBLE) as ask_size,
+            CAST(NULL AS INTEGER) as bid_count,
+            CAST(NULL AS INTEGER) as ask_count
+        WHERE FALSE
+        """
+        )
+        self.logger.info("Created empty tick_data view")
 
     def close(self) -> None:
         """Close the database connection if open."""
@@ -695,7 +759,7 @@ class DatabaseManager:
             (abs_file_path,),
         )
 
-        if not already_ingested.empty:
+        if not already_ingested.is_empty():
             self.logger.info(f"Skipping already ingested file: {abs_file_path}")
             return 0
 
@@ -718,7 +782,7 @@ class DatabaseManager:
                 (file_hash,),
             )
 
-            if not hash_match.empty:
+            if not hash_match.is_empty():
                 self.logger.info(
                     f"Skipping file with duplicate content: {abs_file_path}, matches {hash_match.iloc[0]['file_path']}"
                 )
@@ -834,17 +898,17 @@ class DatabaseManager:
             try:
                 result = self.query_to_df(query)
                 already_ingested = set(
-                    result["file_path"].tolist() if not result.empty else []
+                    result["file_path"].tolist() if not result.is_empty() else []
                 )
             except Exception as e:
                 # Fall back to individual checks if the combined query is too large
                 self.logger.warning(f"Falling back to individual file checks: {e}")
-                for file_path in abs_file_paths:
-                    result = self.query_to_df(
+                for file_path in abs_file_paths:    
+                    result = self.query_to_df(  
                         "SELECT file_path FROM ingested_files WHERE file_path = ?",
                         (file_path,),
                     )
-                    if not result.empty:
+                    if not result.is_empty():
                         already_ingested.add(file_path)
 
         skipped_count = 0
@@ -892,6 +956,348 @@ class DatabaseManager:
             f"{total_rows} total rows ingested"
         )
         return total_rows
+
+    def ingest_tbbo_file(self, file_path: str) -> int:
+        """Ingest a `.tbbo.csv.zst` file into the tick database.
+
+        :param file_path: Absolute or relative path to a TBBO tick file.
+        :type file_path: str
+        :returns: Number of rows ingested (0 if duplicate or invalid).
+        :rtype: int
+        :raises FileNotFoundError: If the file cannot be found.
+        :raises ValueError: If the file format or columns are invalid.
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"TBBO file not found: {file_path}")
+
+        if not file_path.endswith(".tbbo.csv.zst"):
+            raise ValueError(
+                f"Invalid TBBO file format for {file_path}. Expected .tbbo.csv.zst"
+            )
+
+        # Normalize the file path to ensure consistent comparison
+        abs_file_path = os.path.abspath(file_path)
+        file_size = os.path.getsize(abs_file_path)
+        source_name = os.path.basename(abs_file_path)
+
+        # Check if this file has already been ingested
+        already_ingested = self.query_to_df(
+            """
+        SELECT file_path FROM ingested_files WHERE file_path = ?
+        """,
+            (abs_file_path,),
+        )
+
+        if not already_ingested.is_empty():
+            self.logger.info(f"Skipping already ingested file: {abs_file_path}")
+            return 0
+
+        self.logger.info(f"Ingesting TBBO file: {abs_file_path}")
+
+        try:
+            # Compute a simple hash for the file
+            import hashlib
+            import io
+
+            file_hash = None
+            with open(abs_file_path, "rb") as f:
+                # Just hash the first 1MB to save time while still detecting changes
+                file_hash = hashlib.md5(f.read(1024 * 1024)).hexdigest()
+
+            # Check if a file with the same hash has been ingested
+            hash_match = self.query_to_df(
+                """
+            SELECT file_path FROM ingested_files WHERE file_hash = ?
+            """,
+                (file_hash,),
+            )
+
+            if not hash_match.is_empty():
+                self.logger.info(
+                    f"Skipping file with duplicate content: {abs_file_path}, matches {hash_match.iloc[0]['file_path']}"
+                )
+                return 0
+
+            # Decompress the file
+            import zstandard as zstd
+
+            with open(abs_file_path, "rb") as f:
+                dctx = zstd.ZstdDecompressor()
+                stream_reader = dctx.stream_reader(f)
+                
+                # Read in chunks to properly handle the compressed stream
+                chunks = []
+                while True:
+                    chunk = stream_reader.read(8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                
+                # Convert bytes to string and create StringIO for Polars
+                full_data = b''.join(chunks)
+                csv_content = full_data.decode("utf-8")
+                csv_stream = io.StringIO(csv_content)
+
+                # Load CSV data
+                df = pl.read_csv(csv_stream)
+
+                # Validate required columns for TBBO data
+                required_columns = [
+                    "ts_event",
+                    "symbol",
+                    "side", 
+                    "price",
+                    "size",
+                    "bid_px_00",
+                    "ask_px_00",
+                    "bid_sz_00",
+                    "ask_sz_00",
+                    "bid_ct_00",
+                    "ask_ct_00",
+                ]
+                missing_columns = [
+                    col for col in required_columns if col not in df.columns
+                ]
+                if missing_columns:
+                    raise ValueError(
+                        f"Missing required columns in TBBO file: {missing_columns}"
+                    )
+
+                # Rename columns for consistency with expected schema
+                df = df.rename({
+                    "ts_event": "timestamp",
+                    "bid_px_00": "bid_price",
+                    "ask_px_00": "ask_price", 
+                    "bid_sz_00": "bid_size",
+                    "ask_sz_00": "ask_size",
+                    "bid_ct_00": "bid_count",
+                    "ask_ct_00": "ask_count"
+                })
+                # Note: side, price, and size columns keep their original names
+
+                # Ensure timestamp is datetime
+                df = df.with_columns(
+                    pl.col("timestamp").cast(pl.Datetime).dt.replace_time_zone("UTC")
+                )
+
+                # Ingest the tick data using dedicated tick data ingestion
+                row_count = self.ingest_tick_data(df, source_name)
+
+                # Record the file in ingested_files table
+                self.conn.execute(
+                    """
+                INSERT INTO ingested_files (file_path, file_hash, source_name, file_size, row_count)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                    (abs_file_path, file_hash, source_name, file_size, row_count),
+                )
+
+                return row_count
+
+        except Exception as e:
+            self.logger.error(f"Failed to ingest TBBO file {abs_file_path}: {e}")
+            raise
+
+    def ingest_tbbo_directory(
+        self,
+        directory: str = "data",
+        pattern: str = "*.tbbo.csv.zst",
+        max_files: int = None,
+    ) -> int:
+        """Ingest all matching TBBO files in a directory.
+
+        :param directory: Directory to search recursively.
+        :type directory: str
+        :param pattern: Glob pattern (e.g., '*.tbbo.csv.zst').
+        :type pattern: str
+        :param max_files: Maximum number of files to process (None=unlimited).
+        :type max_files: int | None
+        :returns: Total number of rows ingested.
+        :rtype: int
+        """
+        if not os.path.exists(directory):
+            raise FileNotFoundError(f"Directory not found: {directory}")
+
+        # Find all matching files recursively
+        files = glob.glob(os.path.join(directory, "**", pattern), recursive=True)
+        files.sort()  # Process files in sorted order for consistency
+
+        if max_files and max_files > 0:
+            files = files[:max_files]
+
+        if not files:
+            self.logger.warning(f"No TBBO files found matching pattern '{pattern}' in {directory}")
+            return 0
+
+        self.logger.info(f"Found {len(files)} TBBO files to process")
+
+        # Check which files are already ingested
+        abs_file_paths = [os.path.abspath(f) for f in files]
+        file_paths_str = "', '".join(abs_file_paths)
+
+        already_ingested = set()
+        if file_paths_str:
+            query = f"SELECT file_path FROM ingested_files WHERE file_path IN ('{file_paths_str}')"
+            try:
+                result = self.query_to_df(query)
+                already_ingested = set(
+                    result["file_path"].tolist() if not result.is_empty() else []
+                )
+            except Exception as e:
+                # Fall back to individual checks if the combined query is too large
+                self.logger.warning(f"Falling back to individual file checks: {e}")
+                for file_path in abs_file_paths:
+                    result = self.query_to_df(
+                        "SELECT file_path FROM ingested_files WHERE file_path = ?",
+                        (file_path,),
+                    )
+                    if not result.is_empty():
+                        already_ingested.add(file_path)
+
+        skipped_count = 0
+        new_files = []
+        for file_path in files:
+            abs_path = os.path.abspath(file_path)
+            if abs_path in already_ingested:
+                skipped_count += 1
+            else:
+                new_files.append(file_path)
+
+        if skipped_count > 0:
+            self.logger.info(f"Skipping {skipped_count} already ingested files")
+
+        if not new_files:
+            self.logger.info("All files have already been ingested, nothing to do")
+            return 0
+
+        self.logger.info(f"Ingesting {len(new_files)} new TBBO files")
+
+        # Ingest each file
+        total_rows = 0
+        success_count = 0
+        error_count = 0
+
+        for file_path in new_files:
+            try:
+                rows = self.ingest_tbbo_file(file_path)
+                if rows > 0:
+                    total_rows += rows
+                    success_count += 1
+                    self.logger.info(f"Successfully ingested {file_path}: {rows} rows")
+                else:
+                    skipped_count += 1
+                    self.logger.info(
+                        f"Skipped {file_path}: already ingested or duplicate content"
+                    )
+            except Exception as e:
+                error_count += 1
+                self.logger.error(f"Failed to ingest {file_path}: {e}")
+
+        self.logger.info(
+            f"TBBO ingestion summary: {success_count} new files processed successfully, "
+            f"{skipped_count} files skipped (duplicates), {error_count} errors, "
+            f"{total_rows} total rows ingested"
+        )
+        return total_rows
+
+    def ingest_tick_data(self, df: pl.DataFrame, source_name: str) -> int:
+        """
+        Ingest tick data DataFrame into the tick-specific partitioned storage.
+
+        :param df: DataFrame containing tick data with columns: timestamp, symbol, bid_price, ask_price, bid_size, ask_size.
+        :type df: pl.DataFrame
+        :param source_name: Name identifying the data source.
+        :type source_name: str
+        :returns: Number of rows ingested.
+        :rtype: int
+        :raises ValueError: If required columns are missing.
+        """
+        if df.is_empty():
+            self.logger.warning(f"No data to ingest for source: {source_name}")
+            return 0
+
+        try:
+            # Validate required columns for tick data
+            required_columns = ["timestamp", "symbol", "side", "price", "size", "bid_price", "ask_price", "bid_size", "ask_size", "bid_count", "ask_count"]
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {missing_columns}")
+
+            # Normalize timestamps - convert to timezone-naive UTC for consistency
+            timestamp_dtype = df.schema["timestamp"]
+            if hasattr(timestamp_dtype, 'time_zone') and timestamp_dtype.time_zone is not None:
+                # Convert to UTC and remove timezone info in separate steps
+                df = df.with_columns(
+                    pl.col("timestamp").dt.convert_time_zone("UTC")
+                )
+                df = df.with_columns(
+                    pl.col("timestamp").dt.replace_time_zone(None)
+                )
+            else:
+                # Assume UTC if no timezone info is present
+                self.logger.info("Timestamp data has no timezone info, assuming UTC")
+
+            # Add year and month columns for partitioning
+            df = df.with_columns(
+                [
+                    pl.col("timestamp").dt.year().alias("year"),
+                    pl.col("timestamp").dt.month().alias("month"),
+                ]
+            )
+
+            # Add partition path for tick data (separate from OHLCV data)
+            source_path = f"tick_ingested/{source_name.replace('.', '_')}"
+
+            # Write partitioned tick data - partition by year and month first to reduce partitions
+            partition_cols = ["year", "month"]
+
+            # Use separate partitioned directory for tick data
+            tick_partitioned_dir = os.path.join(self.parquet_dir, "tick_partitioned")
+            os.makedirs(tick_partitioned_dir, exist_ok=True)
+            
+            # Temporarily override parquet manager's data dir for tick data
+            original_data_dir = self.parquet_manager.data_dir
+            self.parquet_manager.data_dir = tick_partitioned_dir
+            
+            try:
+                self.parquet_manager.write_data_partitioned(df, partition_cols)
+            finally:
+                # Restore original data dir
+                self.parquet_manager.data_dir = original_data_dir
+
+            # Record the data source
+            min_date = df.select(pl.col("timestamp").min()).item()
+            max_date = df.select(pl.col("timestamp").max()).item()
+
+            # Insert or update data source record for tick data
+            self.conn.execute(
+                """
+            INSERT INTO data_sources (source_name, source_path, format, row_count, start_date, end_date)
+            VALUES (?, ?, 'tick_parquet', ?, ?, ?)
+            """,
+                (source_name, source_path, len(df), min_date, max_date),
+            )
+
+            # Insert symbols if they don't exist
+            symbols = df.select("symbol").unique()["symbol"].to_list()
+            for symbol in symbols:
+                self.conn.execute(
+                    """
+                INSERT INTO symbols (symbol) VALUES (?)
+                ON CONFLICT (symbol) DO NOTHING
+                """,
+                    (symbol,),
+                )
+
+            # Refresh the tick_data view to include the new data
+            self._create_tick_data_view()
+
+            self.logger.info(f"Ingested {len(df)} tick data rows from {source_name}")
+            return len(df)
+
+        except Exception as e:
+            self.logger.error(f"Tick data ingestion failed for {source_name}: {e}")
+            raise
 
     def get_available_trading_days(self) -> pl.Series:
         """Return all UTC trading days with at least one `market_data` row.
@@ -1073,6 +1479,71 @@ class DatabaseManager:
 
         except Exception as e:
             self.logger.error(f"Failed to get market data: {e}")
+            return pl.DataFrame()
+
+    def get_tick_data(
+        self,
+        start_date: datetime = None,
+        end_date: datetime = None,
+        symbols: Optional[List[str]] = None,
+        timezone: str = "UTC",
+        limit: Optional[int] = None,
+    ) -> pl.DataFrame:
+        """Query tick data with flexible time and symbol filters.
+
+        :param start_date: Optional inclusive start timestamp.
+        :type start_date: Optional[datetime]
+        :param end_date: Optional inclusive end timestamp.
+        :type end_date: Optional[datetime]
+        :param symbols: Optional list of symbols to restrict results.
+        :type symbols: Optional[list[str]]
+        :param timezone: Timezone for timestamp columns in the result.
+        :type timezone: str
+        :param limit: If provided, limit the number of rows returned.
+        :type limit: Optional[int]
+        :returns: Tick data DataFrame ordered by timestamp and symbol.
+        :rtype: pl.DataFrame
+        """
+        try:
+            query = "SELECT * FROM tick_data"
+            conditions = []
+            params = []
+
+            if start_date:
+                conditions.append("timestamp >= ?")
+                params.append(start_date)
+
+            if end_date:
+                conditions.append("timestamp <= ?")
+                params.append(end_date)
+
+            if symbols and len(symbols) > 0:
+                if len(symbols) <= 10:
+                    symbols_list = ", ".join([f"'{s}'" for s in symbols])
+                    conditions.append(f"symbol IN ({symbols_list})")
+                else:
+                    self.conn.execute(
+                        "CREATE TEMP TABLE IF NOT EXISTS temp_tick_symbols (symbol VARCHAR)"
+                    )
+                    self.conn.execute("DELETE FROM temp_tick_symbols")
+                    for symbol in symbols:
+                        self.conn.execute(
+                            "INSERT INTO temp_tick_symbols VALUES (?)", (symbol,)
+                        )
+                    conditions.append("symbol IN (SELECT symbol FROM temp_tick_symbols)")
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            query += " ORDER BY timestamp, symbol"
+            
+            if limit:
+                query += f" LIMIT {limit}"
+
+            return self.query_to_df(query, tuple(params), timezone=timezone)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get tick data: {e}")
             return pl.DataFrame()
 
     def get_unified_timestamps(

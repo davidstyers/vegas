@@ -503,23 +503,76 @@ class Portfolio:
             # Convert returns to pandas Series for quantstats
             returns_series = returns_df.to_pandas().set_index("timestamp")["return"]
             
-            # Core statistics using quantstats (maintaining original interface)
-            stats["sharpe_ratio"] = qs.stats.sharpe(returns_series)
-            stats["annual_return_pct"] = qs.stats.cagr(returns_series) * 100
-            stats["max_drawdown_pct"] = abs(qs.stats.max_drawdown(returns_series)) * 100
+            # Core statistics using quantstats (with error handling for edge cases)
+            try:
+                stats["sharpe_ratio"] = qs.stats.sharpe(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["sharpe_ratio"] = 0.0
+                
+            try:
+                stats["annual_return_pct"] = qs.stats.cagr(returns_series) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["annual_return_pct"] = 0.0
+                
+            try:
+                stats["max_drawdown_pct"] = abs(qs.stats.max_drawdown(returns_series)) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["max_drawdown_pct"] = 0.0
             
             # Additional useful statistics
-            stats["volatility_pct"] = qs.stats.volatility(returns_series) * 100
-            stats["sortino_ratio"] = qs.stats.sortino(returns_series)
-            stats["calmar_ratio"] = qs.stats.calmar(returns_series)
-            stats["var_95"] = qs.stats.var(returns_series, 0.05) * 100
-            stats["cvar_95"] = qs.stats.cvar(returns_series, 0.05) * 100
-            stats["win_rate"] = qs.stats.win_rate(returns_series) * 100
-            stats["profit_factor"] = qs.stats.profit_factor(returns_series)
-            stats["best_day"] = qs.stats.best(returns_series) * 100
-            stats["worst_day"] = qs.stats.worst(returns_series) * 100
-            stats["skewness"] = qs.stats.skew(returns_series)
-            stats["kurtosis"] = qs.stats.kurtosis(returns_series)
+            try:
+                stats["volatility_pct"] = qs.stats.volatility(returns_series) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["volatility_pct"] = 0.0
+                
+            try:
+                stats["sortino_ratio"] = qs.stats.sortino(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["sortino_ratio"] = 0.0
+                
+            try:
+                stats["calmar_ratio"] = qs.stats.calmar(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["calmar_ratio"] = 0.0
+                
+            try:
+                stats["var_95"] = qs.stats.var(returns_series, 0.05) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["var_95"] = 0.0
+                
+            try:
+                stats["cvar_95"] = qs.stats.cvar(returns_series, 0.05) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["cvar_95"] = 0.0
+                
+            try:
+                stats["win_rate"] = qs.stats.win_rate(returns_series) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["win_rate"] = 0.0
+                
+            try:
+                stats["profit_factor"] = qs.stats.profit_factor(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["profit_factor"] = 0.0
+                
+            try:
+                stats["best_day"] = qs.stats.best(returns_series) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["best_day"] = 0.0
+                
+            try:
+                stats["worst_day"] = qs.stats.worst(returns_series) * 100
+            except (ZeroDivisionError, ValueError):
+                stats["worst_day"] = 0.0
+            try:
+                stats["skewness"] = qs.stats.skew(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["skewness"] = 0.0
+                
+            try:
+                stats["kurtosis"] = qs.stats.kurtosis(returns_series)
+            except (ZeroDivisionError, ValueError):
+                stats["kurtosis"] = 0.0
         else:
             # Fallback to basic stats if insufficient data
             stats["sharpe_ratio"] = 0.0

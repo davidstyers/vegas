@@ -46,6 +46,8 @@ from vegas.analytics import Results
 from vegas.analytics.results_helper import create_results_from_dict
 from vegas.broker import Broker
 from vegas.data import DataLayer, DataPortal
+from vegas.data.transform import FrequencyManager
+from vegas.data.transform.base import DataType
 from vegas.pipeline.engine import PipelineEngine
 from vegas.portfolio import Portfolio
 from vegas.strategy import Context, Signal, Strategy
@@ -334,6 +336,8 @@ class BacktestEngine:
         end: datetime,
         strategy: Strategy,
         initial_capital: float = 100_000.0,
+        frequency: str = "1h",
+        data_type: str = "ohlcv",
     ) -> Results:
         """Run a historical backtest between ``start`` and ``end``.
 
@@ -351,11 +355,16 @@ class BacktestEngine:
         :type strategy: Strategy
         :param initial_capital: Initial cash balance used to seed the portfolio and broker.
         :type initial_capital: float
+        :param frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+        :type frequency: str
+        :param data_type: Type of underlying data ("ohlcv", "tick", "tbbo")
+        :type data_type: str
         :returns: A Results object containing stats, equity curve, transactions, positions, and success flag.
         :rtype: Results
         :raises Exception: Propagates exceptions thrown by user strategy code or I/O layers.
         :Example:
-            >>> results = engine.run(start, end, my_strategy, initial_capital=50_000)
+            >>> results = engine.run(start, end, my_strategy, initial_capital=50_000, frequency="4h")
+            >>> results = engine.run(start, end, my_strategy, frequency="tick:1000", data_type="tick")
         """
         self._logger.info(f"Starting backtest from {start} to {end}")
 
@@ -410,11 +419,11 @@ class BacktestEngine:
         start_time = time.time()
 
         # Build the unified timestamp index that will drive daily/intraday iteration.
-        timestamp_index: pl.Series = self._prepare_market_data(start, end)
+        timestamp_index: pl.Series = self._prepare_market_data(start, end, frequency, data_type)
 
         # Run the backtest
         self._logger.info("Executing backtest")
-        results_dict = self._run_backtest(context, timestamp_index)
+        results_dict = self._run_backtest(context, timestamp_index, frequency)
 
         # Calculate execution time
         execution_time = time.time() - start_time
@@ -604,23 +613,29 @@ class BacktestEngine:
         self._logger.info(f"Generated signals for {len(signals_data['datetime'])} timestamps and {len(all_symbols)} symbols")
         return result_df
 
-    def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
+    def _prepare_market_data(self, start: datetime, end: datetime, frequency: str = "1h", data_type: str = "ohlcv") -> pl.Series:
         """Load and prepare data; return the unified timestamp index.
 
         Steps performed:
         - Determine strategy universe if explicitly provided by the strategy.
+        - Parse frequency specification and determine data transformations needed.
         - Compute earliest preload start using window length requirements from attached pipelines.
-        - Preload required frequencies into the ``DataPortal`` cache.
+        - Preload required frequencies into the ``DataPortal`` cache with transformations.
         - Build and return the unified timestamp index that will drive simulation.
 
         :param start: Inclusive start datetime for the backtest window.
         :type start: datetime
         :param end: Inclusive end datetime for the backtest window.
         :type end: datetime
+        :param frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+        :type frequency: str
+        :param data_type: Type of underlying data ("ohlcv", "tick", "tbbo")
+        :type data_type: str
         :returns: Unified timestamp index as a Polars ``Series``.
         :rtype: polars.Series
         :Example:
-            >>> idx = engine._prepare_market_data(start, end)
+            >>> idx = engine._prepare_market_data(start, end, "4h", "ohlcv")
+            >>> idx = engine._prepare_market_data(start, end, "tick:1000", "tick")
         """
         # Determine strategy-provided static universe to reduce I/O, if available.
         try:
@@ -637,10 +652,28 @@ class BacktestEngine:
         except Exception:
             strategy_universe = None
 
-        # Frequencies to materialize. Default to 1h for a balanced intraday cadence.
-        frequency_set: Set[str] = {"1h"}
+        # Parse frequency specification to understand what data transformations are needed
+        freq_spec = FrequencyManager.parse_frequency(frequency, DataType(data_type))
+        self._logger.info(f"Using frequency: {freq_spec.frequency_type.value} with value: {freq_spec.value}")
+        
+        # Validate frequency is compatible with data type
+        if not FrequencyManager.validate_frequency_for_data_type(freq_spec):
+            raise ValueError(f"Frequency '{frequency}' is not compatible with data type '{data_type}'")
+        
+        # Determine what underlying frequencies we need to load from storage
+        # For time-based frequencies, we load the specified frequency
+        # For bar-based frequencies, we need to load tick data first
+        if freq_spec.frequency_type.name == "TIME":
+            frequency_set: Set[str] = {frequency}
+            effective_frequency = frequency
+        else:
+            # For bar-based transformations, we need raw tick data
+            frequency_set = {"tick"}  # Load raw tick data
+            effective_frequency = "tick"
+            
         preload_start: datetime = start
         try:
+            # Add frequencies from attached pipelines
             for pipeline in getattr(self, "attached_pipelines", {}).values():
                 freq: Optional[str] = getattr(pipeline, "frequency", None)
                 if isinstance(freq, str) and freq:
@@ -674,16 +707,24 @@ class BacktestEngine:
         except Exception:
             pass
 
+        # Store the original frequency specification for transformations BEFORE loading data
+        self.data_portal._original_frequency = frequency
+        self.data_portal._original_frequency_spec = freq_spec
+
         self.data_portal.load_data(
             start_date=preload_start,
             end_date=end,
             symbols=strategy_universe,
             frequencies=sorted(frequency_set),
             calendar=cal,
+            data_type=data_type,
         )
 
+        # Store frequency spec for later use in data retrieval
+        self._current_frequency_spec = freq_spec
+        
         # Build and return the timestamp index from the cache.
-        return self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
+        return self.data_portal.get_unified_timestamp_index(start, end, frequency=effective_frequency)
 
     def _prepare_signal_generation_data(self, start: datetime, end: datetime) -> pl.Series:
         """Load and prepare data for signal generation; return the unified timestamp index.
@@ -776,6 +817,7 @@ class BacktestEngine:
         self,
         context: Context,
         timestamp_index: Optional[pl.Series] = None,
+        frequency: str = "1h",
     ) -> Dict[str, Any]:
         """Execute the backtest loop over the provided timestamp index.
 
@@ -789,6 +831,8 @@ class BacktestEngine:
         :type timestamp_index: Optional[polars.Series]
         :param market_hours: Optional market hours (open, close) used by the broker during execution.
         :type market_hours: Optional[tuple[str, str]]
+        :param frequency: Frequency of the data to use for the backtest.
+        :type frequency: str
         :returns: Results dictionary combining stats, equity curve, transactions, and positions.
         :rtype: dict
         :Example:

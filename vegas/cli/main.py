@@ -13,11 +13,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import polars as pl
 from tabulate import tabulate
 
-from vegas.analytics import generate_quantstats_report
+# Optional imports
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
 from vegas.calendars import get_calendar
 from vegas.data import DataLayer
 from vegas.engine import BacktestEngine
@@ -135,6 +140,26 @@ class VegasCLI:
             help="Timezone name (e.g., UTC, US/Eastern)",
         )
         ohlcv_parser.set_defaults(func=self.ingest_ohlcv)
+
+        # Ingest TBBO command  
+        tbbo_parser = subparsers.add_parser(
+            "ingest-tbbo", parents=[common_parser], help="Ingest TBBO tick data"
+        )
+        tbbo_source = tbbo_parser.add_mutually_exclusive_group(required=True)
+        tbbo_source.add_argument("--file", type=str, help="TBBO file to ingest")
+        tbbo_source.add_argument(
+            "--directory", type=str, help="Directory with TBBO files"
+        )
+        tbbo_parser.add_argument(
+            "--max-files", type=int, help="Maximum number of files to ingest"
+        )
+        tbbo_parser.add_argument(
+            "--timezone",
+            type=str,
+            default="UTC",
+            help="Timezone name (e.g., UTC, US/Eastern)",
+        )
+        tbbo_parser.set_defaults(func=self.ingest_tbbo)
 
         # DB status command
         status_parser = subparsers.add_parser(
@@ -380,6 +405,45 @@ class VegasCLI:
             self.logger.error("OHLCV ingestion failed: %s", e)
             return 1
 
+    def ingest_tbbo(self, args: argparse.Namespace) -> int:
+        try:
+            self.calendar = get_calendar(args.calendar if hasattr(args, 'calendar') else "24/7")
+            data_layer = DataLayer(data_dir=args.db_dir, timezone=self.calendar.timezone)
+            if not data_layer.db_manager:
+                self.logger.error("Database manager initialization failed")
+                return 1
+            if args.file:
+                if not os.path.exists(args.file):
+                    self.logger.error("File not found: %s", args.file)
+                    return 1
+                self.logger.info("Ingesting TBBO file: %s", args.file)
+                try:
+                    rows = data_layer.db_manager.ingest_tbbo_file(args.file)
+                    self.logger.info("Ingested %s rows from TBBO file", rows)
+                except Exception as e:
+                    self.logger.error("Failed to ingest TBBO file: %s", e)
+                    return 1
+            elif args.directory:
+                if not os.path.exists(args.directory):
+                    self.logger.error("Directory not found: %s", args.directory)
+                    return 1
+                self.logger.info("Ingesting TBBO files from directory: %s", args.directory)
+                try:
+                    max_files = args.max_files if args.max_files and args.max_files > 0 else None
+                    rows = data_layer.db_manager.ingest_tbbo_directory(args.directory, max_files=max_files)
+                    self.logger.info("Ingested %s rows from TBBO files", rows)
+                except Exception as e:
+                    self.logger.error("Failed to ingest TBBO directory: %s", e)
+                    return 1
+            else:
+                self.logger.error("No data source specified. Provide --file or --directory")
+                return 1
+            print(f"\nDatabase status after ingestion:")
+            return self._db_status_internal(args)
+        except Exception as e:
+            self.logger.error("TBBO ingestion failed: %s", e)
+            return 1
+
     def db_status(self, args: argparse.Namespace) -> int:
         return self._db_status_internal(args)
 
@@ -607,14 +671,17 @@ class VegasCLI:
             
         has_data = hasattr(equity_curve, "is_empty") and not equity_curve.is_empty
         if args.output and has_data:
-            plt.figure(figsize=(12, 6))
-            plt.plot(equity_curve["timestamp"], equity_curve["equity"])
-            plt.title(f"Portfolio Equity Curve - {strategy_name}")
-            plt.xlabel("Date")
-            plt.ylabel("Equity ($)")
-            plt.grid(True)
-            plt.savefig(args.output)
-            self.logger.info("Equity curve saved to %s", args.output)
+            if HAS_MATPLOTLIB:
+                plt.figure(figsize=(12, 6))
+                plt.plot(equity_curve["timestamp"], equity_curve["equity"])
+                plt.title(f"Portfolio Equity Curve - {strategy_name}")
+                plt.xlabel("Date")
+                plt.ylabel("Equity ($)")
+                plt.grid(True)
+                plt.savefig(args.output)
+                self.logger.info("Equity curve saved to %s", args.output)
+            else:
+                self.logger.error("Matplotlib not available. Cannot save equity curve plot.")
         if args.results_csv and has_data:
             equity_curve.write_csv(args.results_csv)
             self.logger.info("Results saved to %s", args.results_csv)
@@ -628,29 +695,13 @@ class VegasCLI:
     ) -> None:
         """Generate QuantStats report using the Results object's create_tearsheet method."""
         try:
-            # Handle both Results objects and dictionaries for backward compatibility
-            if hasattr(results, 'create_tearsheet'):
-                # Results object - use its built-in method
-                results.create_tearsheet(
-                    title=f"{strategy_name} Performance Report",
-                    benchmark_symbol=benchmark,
-                    output_file=report_path,
-                    output_format="html"
-                )
-                self.logger.info("QuantStats report generation complete")
-            else:
-                # Dictionary (backward compatibility) - use the function
-                success = generate_quantstats_report(
-                    results=results,
-                    strategy_name=strategy_name,
-                    report_path=report_path,
-                    benchmark=benchmark,
-                    logger=self.logger,
-                )
-                if success:
-                    self.logger.info("QuantStats report generation complete")
-                else:
-                    self.logger.error("QuantStats report generation failed")
+            results.create_tearsheet(
+                title=f"{strategy_name} Performance Report",
+                benchmark_symbol=benchmark,
+                output_file=report_path,
+                output_format="html"
+            )
+            self.logger.info("QuantStats report generation complete")
         except Exception as e:
             self.logger.error(f"Error generating QuantStats report: {e}")
 
