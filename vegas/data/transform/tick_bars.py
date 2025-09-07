@@ -38,7 +38,7 @@ class TickBars(BarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for tick bars."""
-        return ["timestamp", "price"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for tick bars."""
@@ -79,8 +79,7 @@ class TickBars(BarTransformer):
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
-            pl.col("size").sum().alias("volume") if "size" in df.columns 
-            else pl.lit(self.bar_size).alias("volume"),
+            pl.col("size").sum().alias("volume"),
         ]).drop("bar_id")
         
         return bars.sort("timestamp")
@@ -100,7 +99,7 @@ class VolumeBars(BarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for volume bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for volume bars."""
@@ -129,21 +128,21 @@ class VolumeBars(BarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate cumulative volume and bar groups
+        # Calculate cumulative volume and bar groups per symbol
         df = df.with_columns(
-            pl.col("volume").cumsum().alias("cum_volume")
+            pl.col("size").cum_sum().over("symbol").alias("cum_volume")
         ).with_columns(
             (pl.col("cum_volume") / self.bar_size).floor().alias("bar_id")
         )
         
-        # Aggregate into bars
-        bars = df.group_by("bar_id").agg([
+        # Aggregate into bars, preserving symbol column
+        bars = df.group_by(["symbol", "bar_id"]).agg([
             pl.col("timestamp").first().alias("timestamp"),
             pl.col("price").first().alias("open"),
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
+            pl.col("size").sum().alias("volume"),
         ]).drop("bar_id")
         
         return bars.sort("timestamp")
@@ -163,7 +162,7 @@ class DollarBars(BarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for dollar bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for dollar bars."""
@@ -192,23 +191,23 @@ class DollarBars(BarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate dollar volume and cumulative sum
+        # Calculate dollar volume and cumulative sum per symbol
         df = df.with_columns(
-            (pl.col("price") * pl.col("volume")).alias("dollar_volume")
+            (pl.col("price") * pl.col("size")).alias("dollar_volume")
         ).with_columns(
-            pl.col("dollar_volume").cumsum().alias("cum_dollar_volume")
+            pl.col("dollar_volume").cum_sum().over("symbol").alias("cum_dollar_volume")
         ).with_columns(
             (pl.col("cum_dollar_volume") / self.bar_size).floor().alias("bar_id")
         )
         
-        # Aggregate into bars
-        bars = df.group_by("bar_id").agg([
+        # Aggregate into bars, preserving symbol column
+        bars = df.group_by(["symbol", "bar_id"]).agg([
             pl.col("timestamp").first().alias("timestamp"),
             pl.col("price").first().alias("open"),
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
+            pl.col("size").sum().alias("volume"),
         ]).drop("bar_id")
         
         return bars.sort("timestamp")
@@ -258,10 +257,17 @@ class TickImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule (buy/sell classification)
+        # Calculate tick rule (buy/sell classification) per symbol
         df = df.with_columns(
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule")
-        )
+            pl.col("price").diff().over("symbol").alias("price_diff")
+        ).with_columns(
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule")
+        ).drop("price_diff")
         
         # Calculate imbalance and create bars
         return self._create_imbalance_bars(df, "tick_rule")
@@ -276,41 +282,61 @@ class TickImbalanceBars(ImbalanceBarTransformer):
         Returns:
             DataFrame with imbalance bars
         """
-        bars = []
-        current_bar_start = 0
-        cumulative_theta = 0.0
-        
-        # Convert to pandas for iterative processing (more efficient for this algorithm)
-        df_pd = df.to_pandas()
-        
-        for i in range(len(df_pd)):
-            cumulative_theta += df_pd[imbalance_col].iloc[i]
+        if df.is_empty():
+            return pl.DataFrame(schema=self.get_output_schema())
             
-            # Check if bar should close
-            expected_imbalance_abs = abs(self.expected_imbalance) * self.bar_size
-            if abs(cumulative_theta) >= expected_imbalance_abs or i == len(df_pd) - 1:
-                # Create bar from current_bar_start to i
-                bar_data = df_pd.iloc[current_bar_start:i+1]
+        expected_imbalance_abs = abs(self.expected_imbalance) * self.bar_size
+        
+        # Process each symbol separately for stateful imbalance calculation
+        all_bars = []
+        symbols = df["symbol"].unique().to_list()
+        
+        for symbol in symbols:
+            symbol_df = df.filter(pl.col("symbol") == symbol)
+            if symbol_df.is_empty():
+                continue
                 
-                if len(bar_data) > 0:
-                    bar = {
-                        "timestamp": bar_data["timestamp"].iloc[0],
-                        "open": bar_data["price"].iloc[0],
-                        "high": bar_data["price"].max(),
-                        "low": bar_data["price"].min(),
-                        "close": bar_data["price"].iloc[-1],
-                        "volume": len(bar_data) if "volume" not in bar_data.columns 
-                                 else bar_data["volume"].sum(),
-                    }
-                    bars.append(bar)
+            # Get imbalance values for this symbol
+            imbalance_array = symbol_df[imbalance_col].to_numpy()
+            
+            # Compute bar IDs efficiently using numpy
+            bar_ids = np.zeros(len(imbalance_array), dtype=np.int32)
+            cumulative_theta = 0.0
+            current_bar_id = 0
+            
+            for i in range(len(imbalance_array)):
+                bar_ids[i] = current_bar_id
+                cumulative_theta += imbalance_array[i]
                 
-                # Reset for next bar
-                current_bar_start = i + 1
+                # Check if bar should close
+                if abs(cumulative_theta) >= expected_imbalance_abs or i == len(imbalance_array) - 1:
+                    current_bar_id += 1
                 cumulative_theta = 0.0
                 
-        # Convert back to Polars DataFrame
-        if bars:
-            return pl.DataFrame(bars).sort("timestamp")
+            # Add bar IDs back to the symbol dataframe
+            symbol_df_with_bars = symbol_df.with_columns([
+                pl.Series("bar_id", bar_ids)
+            ])
+            
+            # Group by bar_id and aggregate into OHLCV bars for this symbol
+            symbol_bars = symbol_df_with_bars.group_by("bar_id").agg([
+                pl.col("symbol").first().alias("symbol"),
+                pl.col("timestamp").first().alias("timestamp"),
+                pl.col("price").first().alias("open"),
+                pl.col("price").max().alias("high"),
+                pl.col("price").min().alias("low"),
+                pl.col("price").last().alias("close"),
+                pl.when(pl.col("size").is_not_null().any())
+                  .then(pl.col("size").sum())
+                  .otherwise(pl.len())
+                  .alias("volume")
+            ])
+            
+            all_bars.append(symbol_bars)
+        
+        # Combine all symbols and sort by timestamp
+        if all_bars:
+            return pl.concat(all_bars).sort("timestamp")
         else:
             return pl.DataFrame(schema=self.get_output_schema())
 
@@ -330,7 +356,7 @@ class VolumeImbalanceBars(ImbalanceBarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for volume imbalance bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for volume imbalance bars."""
@@ -359,12 +385,19 @@ class VolumeImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and volume imbalance
-        df = df.with_columns([
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule"),
+        # Calculate tick rule and volume imbalance per symbol
+        df = df.with_columns(
+            pl.col("price").diff().over("symbol").alias("price_diff")
+        ).with_columns([
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule"),
         ]).with_columns(
-            (pl.col("tick_rule") * pl.col("volume")).alias("volume_imbalance")
-        )
+            (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance")
+        ).drop("price_diff")
         
         # Create imbalance bars
         return self._create_imbalance_bars(df, "volume_imbalance")
@@ -385,7 +418,7 @@ class DollarImbalanceBars(ImbalanceBarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for dollar imbalance bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for dollar imbalance bars."""
@@ -414,13 +447,20 @@ class DollarImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and dollar imbalance
+        # Calculate tick rule and dollar imbalance per symbol
         df = df.with_columns([
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule"),
-            (pl.col("price") * pl.col("volume")).alias("dollar_volume")
+            pl.col("price").diff().over("symbol").alias("price_diff"),
+            (pl.col("price") * pl.col("size")).alias("dollar_volume")
+        ]).with_columns([
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule"),
         ]).with_columns(
             (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance")
-        )
+        ).drop("price_diff")
         
         # Create imbalance bars
         return self._create_imbalance_bars(df, "dollar_imbalance")
@@ -469,12 +509,19 @@ class TickRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and runs
+        # Calculate tick rule and runs per symbol
         df = df.with_columns(
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule")
-        ).with_columns(
-            self._calculate_runs(pl.col("tick_rule")).alias("run_group")
-        )
+            pl.col("price").diff().over("symbol").alias("price_diff")
+        ).with_columns([
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule"),
+        ]).with_columns(
+            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+        ).drop("price_diff")
         
         # Create run bars
         return self._create_run_bars(df, "tick_rule")
@@ -489,33 +536,29 @@ class TickRunBars(RunBarTransformer):
         Returns:
             DataFrame with run bars
         """
-        bars = []
-        
-        # Convert to pandas for iterative processing
-        df_pd = df.to_pandas()
-        
-        # Group by run_group and process each run
-        for run_id, run_data in df_pd.groupby("run_group"):
-            run_length = len(run_data)
-            
-            # Create bars from this run if it meets the threshold
-            if run_length >= self.bar_size:
-                bar = {
-                    "timestamp": run_data["timestamp"].iloc[0],
-                    "open": run_data["price"].iloc[0],
-                    "high": run_data["price"].max(),
-                    "low": run_data["price"].min(),
-                    "close": run_data["price"].iloc[-1],
-                    "volume": len(run_data) if "volume" not in run_data.columns 
-                             else run_data["volume"].sum(),
-                }
-                bars.append(bar)
-                
-        # Convert back to Polars DataFrame
-        if bars:
-            return pl.DataFrame(bars).sort("timestamp")
-        else:
+        if df.is_empty():
             return pl.DataFrame(schema=self.get_output_schema())
+        
+        # Filter runs that meet the threshold and aggregate using pure Polars
+        bars = (df
+                .group_by(["symbol", "run_group"])
+                .agg([
+                    pl.len().alias("run_length"),
+                    pl.col("timestamp").first().alias("timestamp"),
+                    pl.col("price").first().alias("open"),
+                    pl.col("price").max().alias("high"),
+                    pl.col("price").min().alias("low"),
+                    pl.col("price").last().alias("close"),
+                    pl.when(pl.col("size").is_not_null().any())
+                      .then(pl.col("size").sum())
+                      .otherwise(pl.len())
+                      .alias("volume")
+                ])
+                .filter(pl.col("run_length") >= self.bar_size)
+                .drop("run_length")
+                .sort("timestamp"))
+        
+        return bars
 
 
 class VolumeRunBars(RunBarTransformer):
@@ -532,7 +575,7 @@ class VolumeRunBars(RunBarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for volume run bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for volume run bars."""
@@ -561,13 +604,20 @@ class VolumeRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule, volume imbalance, and runs
-        df = df.with_columns([
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule"),
+        # Calculate tick rule, volume imbalance, and runs per symbol
+        df = df.with_columns(
+            pl.col("price").diff().over("symbol").alias("price_diff")
+        ).with_columns([
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule"),
         ]).with_columns([
-            (pl.col("tick_rule") * pl.col("volume")).alias("volume_imbalance"),
-            self._calculate_runs(pl.col("tick_rule")).alias("run_group")
-        ])
+            (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance"),
+            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+        ]).drop("price_diff")
         
         # Create run bars using volume imbalance
         return self._create_volume_run_bars(df)
@@ -581,32 +631,26 @@ class VolumeRunBars(RunBarTransformer):
         Returns:
             DataFrame with volume run bars
         """
-        bars = []
-        
-        # Convert to pandas for iterative processing
-        df_pd = df.to_pandas()
-        
-        # Group by run_group and process each run
-        for run_id, run_data in df_pd.groupby("run_group"):
-            run_volume = run_data["volume"].sum()
-            
-            # Create bars from this run if it meets the volume threshold
-            if run_volume >= self.bar_size:
-                bar = {
-                    "timestamp": run_data["timestamp"].iloc[0],
-                    "open": run_data["price"].iloc[0],
-                    "high": run_data["price"].max(),
-                    "low": run_data["price"].min(),
-                    "close": run_data["price"].iloc[-1],
-                    "volume": run_data["volume"].sum(),
-                }
-                bars.append(bar)
-                
-        # Convert back to Polars DataFrame
-        if bars:
-            return pl.DataFrame(bars).sort("timestamp")
-        else:
+        if df.is_empty():
             return pl.DataFrame(schema=self.get_output_schema())
+        
+        # Filter runs that meet the volume threshold and aggregate using pure Polars
+        bars = (df
+                .group_by(["symbol", "run_group"])
+                .agg([
+                    pl.col("size").sum().alias("run_volume"),
+                    pl.col("timestamp").first().alias("timestamp"),
+                    pl.col("price").first().alias("open"),
+                    pl.col("price").max().alias("high"),
+                    pl.col("price").min().alias("low"),
+                    pl.col("price").last().alias("close"),
+                    pl.col("size").sum().alias("volume")
+                ])
+                .filter(pl.col("run_volume") >= self.bar_size)
+                .drop("run_volume")
+                .sort("timestamp"))
+        
+        return bars
 
 
 class DollarRunBars(RunBarTransformer):
@@ -623,7 +667,7 @@ class DollarRunBars(RunBarTransformer):
         
     def get_required_columns(self) -> List[str]:
         """Get required columns for dollar run bars."""
-        return ["timestamp", "price", "volume"]
+        return ["timestamp", "price", "size"]
         
     def validate_input(self, df: pl.DataFrame) -> bool:
         """Validate input DataFrame for dollar run bars."""
@@ -652,14 +696,21 @@ class DollarRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule, dollar volume, and runs
+        # Calculate tick rule, dollar volume, and runs per symbol
         df = df.with_columns([
-            self._calculate_tick_rule(pl.col("price")).alias("tick_rule"),
-            (pl.col("price") * pl.col("volume")).alias("dollar_volume")
+            pl.col("price").diff().over("symbol").alias("price_diff"),
+            (pl.col("price") * pl.col("size")).alias("dollar_volume")
+        ]).with_columns([
+            pl.when(pl.col("price_diff") > 0).then(1)
+              .when(pl.col("price_diff") < 0).then(-1)
+              .otherwise(0)
+              .fill_null(strategy="forward")
+              .fill_null(0)
+              .alias("tick_rule"),
         ]).with_columns([
             (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance"),
-            self._calculate_runs(pl.col("tick_rule")).alias("run_group")
-        ])
+            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+        ]).drop("price_diff")
         
         # Create run bars using dollar volume
         return self._create_dollar_run_bars(df)
@@ -673,29 +724,23 @@ class DollarRunBars(RunBarTransformer):
         Returns:
             DataFrame with dollar run bars
         """
-        bars = []
-        
-        # Convert to pandas for iterative processing
-        df_pd = df.to_pandas()
-        
-        # Group by run_group and process each run
-        for run_id, run_data in df_pd.groupby("run_group"):
-            run_dollar_volume = run_data["dollar_volume"].sum()
-            
-            # Create bars from this run if it meets the dollar volume threshold
-            if run_dollar_volume >= self.bar_size:
-                bar = {
-                    "timestamp": run_data["timestamp"].iloc[0],
-                    "open": run_data["price"].iloc[0],
-                    "high": run_data["price"].max(),
-                    "low": run_data["price"].min(),
-                    "close": run_data["price"].iloc[-1],
-                    "volume": run_data["volume"].sum(),
-                }
-                bars.append(bar)
-                
-        # Convert back to Polars DataFrame
-        if bars:
-            return pl.DataFrame(bars).sort("timestamp")
-        else:
+        if df.is_empty():
             return pl.DataFrame(schema=self.get_output_schema())
+        
+        # Filter runs that meet the dollar volume threshold and aggregate using pure Polars
+        bars = (df
+                .group_by(["symbol", "run_group"])
+                .agg([
+                    pl.col("dollar_volume").sum().alias("run_dollar_volume"),
+                    pl.col("timestamp").first().alias("timestamp"),
+                    pl.col("price").first().alias("open"),
+                    pl.col("price").max().alias("high"),
+                    pl.col("price").min().alias("low"),
+                    pl.col("price").last().alias("close"),
+                    pl.col("size").sum().alias("volume")
+                ])
+                .filter(pl.col("run_dollar_volume") >= self.bar_size)
+                .drop("run_dollar_volume")
+                .sort("timestamp"))
+        
+        return bars

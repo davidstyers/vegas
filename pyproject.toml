@@ -38,6 +38,7 @@ black = "^25.1.0"
 isort = "^6.0.1"
 mypy = "^1.17.1"
 optuna = "^4.4.0"
+lightweight-charts = "^2.1"
 
 [tool.poetry.scripts]
 vegas = "vegas.main:main"

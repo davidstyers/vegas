@@ -757,7 +757,7 @@ class DataLayer:
         Args:
             df: Input DataFrame
             frequency: Frequency specification (e.g., "1h", "tick:1000", "volume:5000")
-            data_type: Type of data ("ohlcv", "tick", "tbbo")
+            data_type: Type of data ("ohlcv", "tick")
             
         Returns:
             Transformed DataFrame

@@ -420,6 +420,7 @@ class BacktestEngine:
 
         # Build the unified timestamp index that will drive daily/intraday iteration.
         timestamp_index: pl.Series = self._prepare_market_data(start, end, frequency, data_type)
+        print(timestamp_index)
 
         # Run the backtest
         self._logger.info("Executing backtest")

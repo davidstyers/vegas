@@ -178,5 +178,5 @@ class RunBarTransformer(BarTransformer):
             Series indicating run groups
         """
         # Create run groups by identifying changes in sign
-        sign_changes = (tick_rule != tick_rule.shift(1)).cumsum()
+        sign_changes = (tick_rule != tick_rule.shift(1)).cum_sum()
         return sign_changes
