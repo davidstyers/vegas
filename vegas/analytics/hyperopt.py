@@ -27,11 +27,21 @@ class OptimizationConfig:
     # Parameter ranges (must be provided by user)
     param_ranges: Dict[str, Any]
     
-    # Evaluation configuration
+    # Evaluation configuration (required parameters first)
     objective_metric: str  # Can be "sharpe_ratio", "returns", "max_drawdown", etc.
     n_trials: int
     study_name: str
     direction: str
+    
+    # Frequency optimization ranges
+    frequency_ranges: Optional[Dict[str, Any]] = None  # Frequency optimization ranges
+    
+    # Engine configuration
+    frequency: Optional[str] = None  # Fixed frequency if not optimizing
+    data_type: Optional[str] = None  # Engine data type
+    calendar: Optional[str] = None   # Engine calendar
+    
+    # Optional evaluation configuration
     n_jobs: int = 1
     invalid_value: float = -1e9  # Value to return for failed evaluations
 
@@ -68,12 +78,27 @@ def evaluate_strategy_params(
         from vegas.engine import BacktestEngine
         strategy = strategy_factory(**strategy_params)
         engine = BacktestEngine()
-        results = engine.run(
-            start=start_date,
-            end=end_date,
-            strategy=strategy,
-            initial_capital=config.initial_capital,
-        )
+        
+        # Set calendar if provided
+        if config.calendar:
+            engine.set_calendar(config.calendar)
+        
+        # Prepare engine.run arguments
+        run_kwargs = {
+            "start": start_date,
+            "end": end_date,
+            "strategy": strategy,
+            "initial_capital": config.initial_capital,
+        }
+        
+        # Add frequency and data_type (check strategy_params first for optimized values, then config)
+        if "frequency" in strategy_params:
+            run_kwargs["frequency"] = strategy_params["frequency"]
+        elif config.frequency:
+            run_kwargs["frequency"] = config.frequency
+        if config.data_type:
+            run_kwargs["data_type"] = config.data_type
+        results = engine.run(**run_kwargs)
         
         stats = results.stats
         
@@ -183,6 +208,15 @@ def create_optuna_objective(
                         log=True
                     )
         
+        # Handle frequency optimization
+        if config.frequency_ranges:
+            for param_name, param_config in config.frequency_ranges.items():
+                if param_config["type"] == "categorical":
+                    params[param_name] = trial.suggest_categorical(
+                        param_name, 
+                        param_config["choices"]
+                    )
+        
         return evaluate_strategy_params(
             strategy_factory=strategy_factory,
             strategy_params=params,
@@ -284,7 +318,7 @@ def run_optimized_backtest(
         param_suggestions: Dictionary mapping parameter names to Optuna suggestion functions
         
     Returns:
-        Backtest results dictionary
+        Strategy instance with optimized parameters
     """
     logger = logging.getLogger(__name__)
     
@@ -302,10 +336,10 @@ def run_optimized_backtest(
         logger.warning("Optimization failed, no valid parameters found")
         return {}
     
-    # Run final evaluation with best parameters
-    strategy = strategy_factory(**best_params)
+    # Return final evaluation with best parameters
+    #strategy = strategy_factory(**best_params)
     
-    return strategy
+    return best_params
 
 
 def print_optimization_summary(
@@ -353,3 +387,19 @@ def print_optimization_summary(
     
     if len(study.trials) > 10:
         logger.info(f"    ... and {len(study.trials) - 10} more trials")
+
+
+def create_frequency_suggestions(frequencies: List[str]) -> Dict[str, Callable]:
+    """Create frequency parameter suggestions for hyperopt.
+    
+    Args:
+        frequencies: List of frequency strings (e.g., ["1h", "4h", "1d"])
+        
+    Returns:
+        Dictionary mapping parameter names to Optuna suggestion functions
+    """
+    return {
+        "frequency": lambda trial: trial.suggest_categorical("frequency", frequencies)
+    }
+
+

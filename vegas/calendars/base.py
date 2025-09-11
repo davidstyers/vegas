@@ -51,3 +51,16 @@ class TwentyFourSevenCalendar(TradingCalendar):
 
     def is_trading_time(self, dt: datetime) -> bool:
         return True
+
+@dataclass
+class TwentyFourSevenESTCalendar(TradingCalendar):
+    """Pass-through calendar for 24/7 markets (e.g., crypto).
+
+    Uses UTC as the canonical timezone.
+    """
+
+    name: str = "24/7"
+    timezone: str = "US/Eastern"
+
+    def is_trading_time(self, dt: datetime) -> bool:
+        return True

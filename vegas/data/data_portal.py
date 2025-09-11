@@ -35,6 +35,8 @@ class DataPortal:
         self._loaded_end: Optional[datetime] = None
         # Active calendar used to filter timestamps (if any)
         self._calendar: Optional[TradingCalendar] = None
+        # Default frequency for future queries
+        self._default_frequency: str = "1h"
 
     # -------------------- Lifecycle --------------------
     def load_data(
@@ -166,6 +168,24 @@ class DataPortal:
             self._data_by_freq[f] = self._resample(self._data_by_freq["1h"], f)
 
     # -------------------- Accessors --------------------
+    def set_frequency(self, frequency: str) -> None:
+        """
+        Set the default frequency for future queries.
+        
+        Args:
+            frequency: The frequency string (e.g., '1h', '1d', '5m', 'tick:100')
+        """
+        self._default_frequency = frequency
+
+    def get_frequency(self) -> str:
+        """
+        Get the current default frequency for queries.
+        
+        Returns:
+            The current default frequency string
+        """
+        return self._default_frequency
+
     def set_current_dt(self, dt: datetime) -> None:
         # Normalize to timezone-aware datetime in portal's timezone
         try:
@@ -180,12 +200,13 @@ class DataPortal:
     def get_symbols(self) -> List[str]:
         return list(self._loaded_symbols)
 
-    def get_unified_timestamp_index(self, start: datetime, end: datetime, frequency: str = "1h") -> pl.Series:
+    def get_unified_timestamp_index(self, start: datetime, end: datetime, frequency: Optional[str] = None) -> pl.Series:
         """
         Return unique, sorted timestamps from the in-memory cache for the requested window.
         Falls back to the DataLayer if cache is not populated for that frequency.
         """
-        df = self._data_by_freq.get(frequency)
+        freq = frequency or self._default_frequency
+        df = self._data_by_freq.get(freq)
         if df is None or df.is_empty():
             return self.data_layer.get_unified_timestamp_index(start, end)
         # Filter and return unique timestamps
@@ -203,7 +224,7 @@ class DataPortal:
             filtered.select(pl.col("timestamp")).unique().sort("timestamp").get_column("timestamp")
         )
 
-    def get_slice(self, timestamp: Optional[datetime] = None, symbols: Optional[Union[str, List[str]]] = None, frequency: str = "1h") -> pl.DataFrame:
+    def get_slice(self, timestamp: Optional[datetime] = None, symbols: Optional[Union[str, List[str]]] = None, frequency: Optional[str] = None) -> pl.DataFrame:
         """Alias for get_slice_for_timestamp with frequency selectable."""
         return self.get_slice_for_timestamp(timestamp=timestamp, symbols=symbols, market_hours=None, frequency=frequency)
 
@@ -212,7 +233,7 @@ class DataPortal:
         timestamp: Optional[datetime] = None,
         symbols: Optional[Union[str, List[str]]] = None,
         market_hours: Optional[tuple] = None,
-        frequency: str = "1h",
+        frequency: Optional[str] = None,
     ) -> pl.DataFrame:
         """
         Return all available rows for the given timestamp and optional symbol subset from cache.
@@ -221,7 +242,8 @@ class DataPortal:
         if ts is None:
             raise ValueError("timestamp is not provided and current_dt is not set")
 
-        df = self._data_by_freq.get(frequency)
+        freq = frequency or self._default_frequency
+        df = self._data_by_freq.get(freq)
         if df is None or df.is_empty():
             return pl.DataFrame()
 
@@ -236,7 +258,7 @@ class DataPortal:
             out = out.filter(pl.col("symbol").is_in(symbols))
         return out
 
-    def get_spot_value(self, asset: str, field: str, dt: datetime, frequency: str = "1h"):
+    def get_spot_value(self, asset: str, field: str, dt: datetime, frequency: Optional[str] = None):
         """Return a scalar field value for a single asset at the given timestamp from cache."""
         df = self.get_slice_for_timestamp(dt, [asset], frequency=frequency)
         if df is None or df.is_empty():
@@ -256,7 +278,7 @@ class DataPortal:
         assets: Optional[Union[str, List[str]]] = None,
         fields: Optional[Union[str, List[str]]] = None,
         bar_count: int = 1,
-        frequency: str = "1h",
+        frequency: Optional[str] = None,
         end_dt: Optional[datetime] = None,
     ) -> pl.DataFrame:
         """
@@ -264,14 +286,15 @@ class DataPortal:
         - assets: None for all symbols; str or list[str] for subset
         - fields: None for all available columns; str or list[str] for subset
         - bar_count: number of trailing bars per symbol
-        - frequency: cache frequency to use
+        - frequency: cache frequency to use (defaults to portal's default frequency)
         """
         # Resolve end timestamp
         dt = end_dt or self._current_dt
         if dt is None:
             raise ValueError("No end_dt provided and current_dt is not set. Call set_current_dt(dt) or pass end_dt.")
 
-        df = self._data_by_freq.get(frequency)
+        freq = frequency or self._default_frequency
+        df = self._data_by_freq.get(freq)
         if df is None or df.is_empty():
             return pl.DataFrame()
 

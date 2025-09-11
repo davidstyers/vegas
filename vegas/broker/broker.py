@@ -605,15 +605,30 @@ class Broker:
                     base_price = o
                 else:
                     base_price = c
+                # Apply slippage to execution price for market orders
+                exec_price = self.slippage_model.apply_slippage(
+                    base_price, order.quantity, symbol_data, is_buy
+                )
             elif effective_order_type == OrderType.LIMIT:
-                # Execute at the prevailing market price but only if favorable to limit
-                # This preserves realistic limit order behavior (price improvement allowed).
-                base_price = c
-
-            # Apply slippage to execution price
-            exec_price = self.slippage_model.apply_slippage(
-                base_price, order.quantity, symbol_data, is_buy
-            )
+                # For limit orders, apply slippage first, then cap by limit price
+                # This ensures slippage doesn't violate the limit price constraint
+                lim = float(order.limit_price)
+                # Apply slippage to close price first
+                slippage_price = self.slippage_model.apply_slippage(
+                    c, order.quantity, symbol_data, is_buy
+                )
+                # Then cap by limit price
+                if is_buy:
+                    # Buy limit: can't pay more than limit
+                    exec_price = min(slippage_price, lim)
+                else:
+                    # Sell limit: can't sell for less than limit
+                    exec_price = max(slippage_price, lim)
+            else:
+                # Apply slippage to execution price for market and other order types
+                exec_price = self.slippage_model.apply_slippage(
+                    base_price, order.quantity, symbol_data, is_buy
+                )
 
             # Commission and affordability
             unfilled = order.quantity - order.filled_quantity

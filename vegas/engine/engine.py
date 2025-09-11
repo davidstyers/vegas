@@ -119,6 +119,9 @@ class BacktestEngine:
         self.pipeline_engine = PipelineEngine(self.data_portal)
         self.attached_pipelines: Dict[str, Any] = {}
         self._pipeline_results: Dict[str, pl.DataFrame] = {}
+        
+        # Default frequency for data queries
+        self._default_frequency: str = "1h"
 
     def set_calendar(self, name: str) -> None:
         """Select the trading calendar used to filter market data.
@@ -134,6 +137,30 @@ class BacktestEngine:
         # Validate early and store name; actual instance is resolved at load time
         get_calendar(name)
         self._calendar_name = name
+
+    def set_frequency(self, frequency: str) -> None:
+        """Set the default frequency for data queries.
+
+        :param frequency: The frequency string (e.g., '1h', '1d', '5m', 'tick:100').
+        :type frequency: str
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> engine.set_frequency("1d")
+        """
+        self._default_frequency = frequency
+        # Also set the frequency on the data portal
+        self.data_portal.set_frequency(frequency)
+
+    def get_frequency(self) -> str:
+        """Get the current default frequency for data queries.
+
+        :returns: The current default frequency string.
+        :rtype: str
+        :Example:
+            >>> freq = engine.get_frequency()
+        """
+        return self._default_frequency
 
     # Legacy market-hours helpers removed in favor of calendar-based filtering.
 
@@ -367,6 +394,9 @@ class BacktestEngine:
             >>> results = engine.run(start, end, my_strategy, frequency="tick:1000", data_type="tick")
         """
         self._logger.info(f"Starting backtest from {start} to {end}")
+
+        # Set the default frequency for this run
+        self.set_frequency(frequency)
 
         # Initialize strategy and portfolio
         self.strategy = strategy

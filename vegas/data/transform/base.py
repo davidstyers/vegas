@@ -154,6 +154,80 @@ class ImbalanceBarTransformer(BarTransformer):
         
         # Forward fill zero values with previous non-zero value
         return tick_rule.fill_null(strategy="forward").fill_null(0)
+    
+    def _create_imbalance_bars(self, df: pl.DataFrame, imbalance_col: str) -> pl.DataFrame:
+        """Create imbalance bars based on imbalance column.
+        
+        Args:
+            df: DataFrame with imbalance column
+            imbalance_col: Name of column containing imbalance values
+            
+        Returns:
+            DataFrame with imbalance bars
+        """
+        if df.is_empty():
+            return pl.DataFrame(schema=self.get_output_schema())
+            
+        # If expected_imbalance is 0, use a default threshold (typically 30% of bar_size)
+        # Otherwise use the specified expected imbalance
+        if abs(self.expected_imbalance) < 1e-10:  # Essentially zero
+            expected_imbalance_abs = 0.3 * self.bar_size  # Default 30% threshold
+        else:
+            expected_imbalance_abs = abs(self.expected_imbalance) * self.bar_size
+        
+        # Process each symbol separately for stateful imbalance calculation
+        all_bars = []
+        symbols = df["symbol"].unique().to_list()
+        
+        for symbol in symbols:
+            symbol_df = df.filter(pl.col("symbol") == symbol)
+            if symbol_df.is_empty():
+                continue
+                
+            # Get imbalance values for this symbol
+            imbalance_array = symbol_df[imbalance_col].to_numpy()
+            
+            # Compute bar IDs efficiently using numpy
+            import numpy as np
+            bar_ids = np.zeros(len(imbalance_array), dtype=np.int32)
+            cumulative_theta = 0.0
+            current_bar_id = 0
+            
+            for i in range(len(imbalance_array)):
+                bar_ids[i] = current_bar_id
+                cumulative_theta += imbalance_array[i]
+                
+                # Check if bar should close
+                if abs(cumulative_theta) >= expected_imbalance_abs or i == len(imbalance_array) - 1:
+                    current_bar_id += 1
+                    cumulative_theta = 0.0
+                
+            # Add bar IDs back to the symbol dataframe
+            symbol_df_with_bars = symbol_df.with_columns([
+                pl.Series("bar_id", bar_ids)
+            ])
+            
+            # Group by bar_id and aggregate into OHLCV bars for this symbol
+            symbol_bars = symbol_df_with_bars.group_by("bar_id").agg([
+                pl.col("symbol").first().alias("symbol"),
+                pl.col("timestamp").first().alias("timestamp"),
+                pl.col("price").first().alias("open"),
+                pl.col("price").max().alias("high"),
+                pl.col("price").min().alias("low"),
+                pl.col("price").last().alias("close"),
+                pl.when(pl.col("size").is_not_null().any())
+                  .then(pl.col("size").sum())
+                  .otherwise(pl.len())
+                  .alias("volume")
+            ])
+            
+            all_bars.append(symbol_bars)
+        
+        # Combine all symbols and sort by timestamp
+        if all_bars:
+            return pl.concat(all_bars).sort("timestamp")
+        else:
+            return pl.DataFrame(schema=self.get_output_schema())
 
 
 class RunBarTransformer(BarTransformer): 
