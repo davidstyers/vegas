@@ -122,6 +122,23 @@ class BarTransformer(DataTransformer):
             "close": tick_group["price"].last(),
             "volume": tick_group["volume"].sum() if "volume" in tick_group.columns else tick_group.height,
         }
+    
+    def _get_side_aggregations(self) -> List[pl.Expr]:
+        """Get side-based aggregation expressions that handle various side value formats.
+        
+        Returns:
+            List of Polars expressions for side aggregations
+        """
+        return [
+            # Sum volume for buy aggressors (B)
+            pl.when(pl.col("side") == "B").then(pl.col("size")).otherwise(0).sum().alias("buy_aggressor"),
+            
+            # Sum volume for sell aggressors (A)
+            pl.when(pl.col("side") == "A").then(pl.col("size")).otherwise(0).sum().alias("sell_aggressor"),
+            
+            # Sum volume for unknown sides (N or null)
+            pl.when((pl.col("side") == "N") | pl.col("side").is_null()).then(pl.col("size")).otherwise(0).sum().alias("unknown_side"),
+        ]
 
 
 class ImbalanceBarTransformer(BarTransformer):

@@ -449,7 +449,7 @@ class DataLayer:
         symbols: Optional[List[str]] = None,
         market_hours: Optional[tuple] = None,
         data_type: str = "ohlcv",
-        frequency: str = "1h",
+        frequency: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> pl.DataFrame:
         """Get data for a backtest period with optional frequency transformation.
@@ -460,11 +460,13 @@ class DataLayer:
             symbols: Optional list of symbols to include
             market_hours: Optional market hours filter (applies only to OHLCV data)
             data_type: Type of data to retrieve ("ohlcv" or "tick")
-            frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+            frequency: Optional data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000").
+                      If None, returns raw data in base format without transformation.
             limit: Optional limit on number of rows returned (useful for tick data)
 
         Returns:
-            DataFrame with market data transformed to the specified frequency
+            DataFrame with market data. If frequency is specified, data is transformed to that frequency.
+            If frequency is None, returns raw data in base format.
 
         """
         # Ensure start and end are timezone-aware
@@ -490,8 +492,11 @@ class DataLayer:
                     # Note: market_hours filtering is not applied to tick data
                     # as tick data is typically used for high-frequency analysis
                     if not raw.is_empty():
-                        # Apply frequency transformations if needed
-                        result = self._apply_frequency_transform(raw, frequency, data_type)
+                        # Apply frequency transformations only if frequency is specified
+                        if frequency is not None:
+                            result = self._apply_frequency_transform(raw, frequency, data_type)
+                        else:
+                            result = raw
                         
                         self.data = result
                         return result
@@ -516,10 +521,13 @@ class DataLayer:
                         else:
                             result = raw
                         
-                        # Apply frequency transformations if needed
-                        self.logger.info(f"Before transformation: {result.height} rows")
-                        result = self._apply_frequency_transform(result, frequency, data_type)
-                        self.logger.info(f"After transformation: {result.height} rows")
+                        # Apply frequency transformations only if frequency is specified
+                        if frequency is not None:
+                            self.logger.info(f"Before transformation: {result.height} rows")
+                            result = self._apply_frequency_transform(result, frequency, data_type)
+                            self.logger.info(f"After transformation: {result.height} rows")
+                        else:
+                            self.logger.info(f"Returning raw data without transformation: {result.height} rows")
                         
                         self.data = result
                         return result

@@ -10,6 +10,7 @@ Implements various bar types from "Advances in Financial Machine Learning":
 - Tick run bars
 - Volume run bars
 - Dollar run bars
+- Side-based bars (using trade aggressor information)
 
 All implementations use Polars for maximum efficiency.
 """
@@ -72,15 +73,26 @@ class TickBars(BarTransformer):
             (pl.arange(0, df.height).over("symbol") // self.bar_size).alias("bar_id")
         )
         
-        # Aggregate into bars, preserving symbol column
-        bars = df.group_by(["symbol", "bar_id"]).agg([
+        # Prepare aggregation columns
+        agg_columns = [
             pl.col("timestamp").first().alias("timestamp"),
             pl.col("price").first().alias("open"),
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
             pl.col("size").sum().alias("volume"),
-        ]).drop("bar_id")
+        ]
+        
+        # Add side-based aggregations if side column exists
+        if "side" in df.columns:
+            # Ensure side column has proper data type for string operations
+            df = df.with_columns(
+                pl.col("side").cast(pl.Utf8, strict=False)
+            )
+            agg_columns.extend(self._get_side_aggregations())
+        
+        # Aggregate into bars, preserving symbol column
+        bars = df.group_by(["symbol", "bar_id"]).agg(agg_columns).drop("bar_id")
         
         return bars.sort("timestamp")
 
@@ -135,15 +147,26 @@ class VolumeBars(BarTransformer):
             (pl.col("cum_volume") / self.bar_size).floor().alias("bar_id")
         )
         
-        # Aggregate into bars, preserving symbol column
-        bars = df.group_by(["symbol", "bar_id"]).agg([
+        # Prepare aggregation columns
+        agg_columns = [
             pl.col("timestamp").first().alias("timestamp"),
             pl.col("price").first().alias("open"),
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
             pl.col("size").sum().alias("volume"),
-        ]).drop("bar_id")
+        ]
+        
+        # Add side-based aggregations if side column exists
+        if "side" in df.columns:
+            # Ensure side column has proper data type for string operations
+            df = df.with_columns(
+                pl.col("side").cast(pl.Utf8, strict=False)
+            )
+            agg_columns.extend(self._get_side_aggregations())
+        
+        # Aggregate into bars, preserving symbol column
+        bars = df.group_by(["symbol", "bar_id"]).agg(agg_columns).drop("bar_id")
         
         return bars.sort("timestamp")
 
@@ -200,15 +223,26 @@ class DollarBars(BarTransformer):
             (pl.col("cum_dollar_volume") / self.bar_size).floor().alias("bar_id")
         )
         
-        # Aggregate into bars, preserving symbol column
-        bars = df.group_by(["symbol", "bar_id"]).agg([
+        # Prepare aggregation columns
+        agg_columns = [
             pl.col("timestamp").first().alias("timestamp"),
             pl.col("price").first().alias("open"),
             pl.col("price").max().alias("high"),
             pl.col("price").min().alias("low"),
             pl.col("price").last().alias("close"),
             pl.col("size").sum().alias("volume"),
-        ]).drop("bar_id")
+        ]
+        
+        # Add side-based aggregations if side column exists
+        if "side" in df.columns:
+            # Ensure side column has proper data type for string operations
+            df = df.with_columns(
+                pl.col("side").cast(pl.Utf8, strict=False)
+            )
+            agg_columns.extend(self._get_side_aggregations())
+        
+        # Aggregate into bars, preserving symbol column
+        bars = df.group_by(["symbol", "bar_id"]).agg(agg_columns).drop("bar_id")
         
         return bars.sort("timestamp")
 
@@ -257,19 +291,31 @@ class TickImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule (buy/sell classification) per symbol
-        df = df.with_columns(
-            pl.col("price").diff().over("symbol").alias("price_diff")
-        ).with_columns(
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .when(pl.col("price_diff").is_null()).then(0)  # First tick
-              .otherwise(0)  # No change
-              .alias("tick_rule")
-        ).drop("price_diff")
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based imbalance (buy vs sell aggressors)
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_imbalance"),
+            ])
+            imbalance_col = "side_imbalance"
+        else:
+            # Calculate tick rule (buy/sell classification) per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns(
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .when(pl.col("price_diff").is_null()).then(0)  # First tick
+                  .otherwise(0)  # No change
+                  .alias("tick_rule")
+            ).drop("price_diff")
+            imbalance_col = "tick_rule"
         
         # Calculate imbalance and create bars
-        return self._create_imbalance_bars(df, "tick_rule")
+        return self._create_imbalance_bars(df, imbalance_col)
 
 
 class VolumeImbalanceBars(ImbalanceBarTransformer):
@@ -316,18 +362,30 @@ class VolumeImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and volume imbalance per symbol
-        df = df.with_columns(
-            pl.col("price").diff().over("symbol").alias("price_diff")
-        ).with_columns([
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .when(pl.col("price_diff").is_null()).then(0)  # First tick
-              .otherwise(0)  # No change
-              .alias("tick_rule"),
-        ]).with_columns(
-            (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance")
-        ).drop("price_diff")
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based volume imbalance
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_rule"),
+            ]).with_columns(
+                (pl.col("side_rule") * pl.col("size")).alias("volume_imbalance")
+            )
+        else:
+            # Calculate tick rule and volume imbalance per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns([
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .when(pl.col("price_diff").is_null()).then(0)  # First tick
+                  .otherwise(0)  # No change
+                  .alias("tick_rule"),
+            ]).with_columns(
+                (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance")
+            ).drop("price_diff")
         
         # Create imbalance bars
         return self._create_imbalance_bars(df, "volume_imbalance")
@@ -377,19 +435,35 @@ class DollarImbalanceBars(ImbalanceBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and dollar imbalance per symbol
-        df = df.with_columns([
-            pl.col("price").diff().over("symbol").alias("price_diff"),
+        # Calculate dollar volume first
+        df = df.with_columns(
             (pl.col("price") * pl.col("size")).alias("dollar_volume")
-        ]).with_columns([
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .when(pl.col("price_diff").is_null()).then(0)  # First tick
-              .otherwise(0)  # No change
-              .alias("tick_rule"),
-        ]).with_columns(
-            (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance")
-        ).drop("price_diff")
+        )
+        
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based dollar imbalance
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_rule"),
+            ]).with_columns(
+                (pl.col("side_rule") * pl.col("dollar_volume")).alias("dollar_imbalance")
+            )
+        else:
+            # Calculate tick rule and dollar imbalance per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns([
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .when(pl.col("price_diff").is_null()).then(0)  # First tick
+                  .otherwise(0)  # No change
+                  .alias("tick_rule"),
+            ]).with_columns(
+                (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance")
+            ).drop("price_diff")
         
         # Create imbalance bars
         return self._create_imbalance_bars(df, "dollar_imbalance")
@@ -438,22 +512,36 @@ class TickRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule and runs per symbol
-        df = df.with_columns(
-            pl.col("price").diff().over("symbol").alias("price_diff")
-        ).with_columns([
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .otherwise(0)
-              .fill_null(strategy="forward")
-              .fill_null(0)
-              .alias("tick_rule"),
-        ]).with_columns(
-            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
-        ).drop("price_diff")
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based rule
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_rule"),
+            ]).with_columns(
+                (pl.col("side_rule") != pl.col("side_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            )
+            rule_col = "side_rule"
+        else:
+            # Calculate tick rule and runs per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns([
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .otherwise(0)
+                  .fill_null(strategy="forward")
+                  .fill_null(0)
+                  .alias("tick_rule"),
+            ]).with_columns(
+                (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            ).drop("price_diff")
+            rule_col = "tick_rule"
         
         # Create run bars
-        return self._create_run_bars(df, "tick_rule")
+        return self._create_run_bars(df, rule_col)
         
     def _create_run_bars(self, df: pl.DataFrame, value_col: str) -> pl.DataFrame:
         """Create run bars based on run groups.
@@ -533,20 +621,33 @@ class VolumeRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule, volume imbalance, and runs per symbol
-        df = df.with_columns(
-            pl.col("price").diff().over("symbol").alias("price_diff")
-        ).with_columns([
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .otherwise(0)
-              .fill_null(strategy="forward")
-              .fill_null(0)
-              .alias("tick_rule"),
-        ]).with_columns([
-            (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance"),
-            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
-        ]).drop("price_diff")
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based rule
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_rule"),
+            ]).with_columns([
+                (pl.col("side_rule") * pl.col("size")).alias("volume_imbalance"),
+                (pl.col("side_rule") != pl.col("side_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            ])
+        else:
+            # Calculate tick rule, volume imbalance, and runs per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns([
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .otherwise(0)
+                  .fill_null(strategy="forward")
+                  .fill_null(0)
+                  .alias("tick_rule"),
+            ]).with_columns([
+                (pl.col("tick_rule") * pl.col("size")).alias("volume_imbalance"),
+                (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            ]).drop("price_diff")
         
         # Create run bars using volume imbalance
         return self._create_volume_run_bars(df)
@@ -625,21 +726,38 @@ class DollarRunBars(RunBarTransformer):
         if df.is_empty():
             return df
             
-        # Calculate tick rule, dollar volume, and runs per symbol
-        df = df.with_columns([
-            pl.col("price").diff().over("symbol").alias("price_diff"),
+        # Calculate dollar volume first
+        df = df.with_columns(
             (pl.col("price") * pl.col("size")).alias("dollar_volume")
-        ]).with_columns([
-            pl.when(pl.col("price_diff") > 0).then(1)
-              .when(pl.col("price_diff") < 0).then(-1)
-              .otherwise(0)
-              .fill_null(strategy="forward")
-              .fill_null(0)
-              .alias("tick_rule"),
-        ]).with_columns([
-            (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance"),
-            (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
-        ]).drop("price_diff")
+        )
+        
+        # Use side field if available, otherwise fall back to tick rule
+        if "side" in df.columns:
+            # Use side-based rule
+            df = df.with_columns([
+                pl.when(pl.col("side") == "Bid").then(1)
+                  .when(pl.col("side") == "Ask").then(-1)
+                  .otherwise(0)  # Unknown side
+                  .alias("side_rule"),
+            ]).with_columns([
+                (pl.col("side_rule") * pl.col("dollar_volume")).alias("dollar_imbalance"),
+                (pl.col("side_rule") != pl.col("side_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            ])
+        else:
+            # Calculate tick rule, dollar volume, and runs per symbol
+            df = df.with_columns(
+                pl.col("price").diff().over("symbol").alias("price_diff")
+            ).with_columns([
+                pl.when(pl.col("price_diff") > 0).then(1)
+                  .when(pl.col("price_diff") < 0).then(-1)
+                  .otherwise(0)
+                  .fill_null(strategy="forward")
+                  .fill_null(0)
+                  .alias("tick_rule"),
+            ]).with_columns([
+                (pl.col("tick_rule") * pl.col("dollar_volume")).alias("dollar_imbalance"),
+                (pl.col("tick_rule") != pl.col("tick_rule").shift(1)).cast(pl.Int32).cum_sum().over("symbol").alias("run_group")
+            ]).drop("price_diff")
         
         # Create run bars using dollar volume
         return self._create_dollar_run_bars(df)
