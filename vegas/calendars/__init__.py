@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Dict
 
-from .base import TradingCalendar, TwentyFourSevenCalendar, TwentyFourSevenESTCalendar
+from .base import TradingCalendar, TwentyFourSevenCalendar
 
 try:
-    from .nyse import NYSECalendar  # optional, create if not present
+    from .nyse import NYSECalendar, NYSECalendarExtended  # optional, create if not present
 except (
     Exception
 ):  # pragma: no cover - optional calendar may be missing in some installs
     NYSECalendar = None  # type: ignore
+    NYSECalendarExtended = None  # type: ignore
 
 _CALENDAR_REGISTRY: Dict[str, TradingCalendar] = {}
 if NYSECalendar is not None:
@@ -19,10 +20,15 @@ if NYSECalendar is not None:
             "XNYS": NYSECalendar(),
         }
     )
+if NYSECalendarExtended is not None:
+    _CALENDAR_REGISTRY.update(
+        {
+            "NYSE_EXT": NYSECalendarExtended(),
+        }
+    )
 _CALENDAR_REGISTRY.update(
     {
         "24/7": TwentyFourSevenCalendar(),
-        "24/7_EST": TwentyFourSevenESTCalendar(),
         "24/7_CRYPTO": TwentyFourSevenCalendar(name="24/7_CRYPTO", timezone="UTC"),
     }
 )
@@ -52,5 +58,6 @@ def get_calendar(name: str) -> TradingCalendar:
 __all__ = [
     "TradingCalendar",
     "NYSECalendar",
+    "NYSECalendarExtended",
     "get_calendar",
 ]

@@ -42,8 +42,11 @@ class Signal:
     :type stop_trail_amount: Optional[float]
     :param stop_trail_percent: Trailing stop percent for bracket child (0.3 = 30%).
     :type stop_trail_percent: Optional[float]
+    :param cancel_order_ids: List of order IDs to cancel before placing this order.
+    :type cancel_order_ids: Optional[List[str]]
     :Example:
         >>> Signal(symbol='AAPL', quantity=10, order_type='limit', limit_price=190.0)
+        >>> Signal(symbol='AAPL', quantity=0, cancel_order_ids=['order_123', 'order_456'])
     """
 
     symbol: str
@@ -61,6 +64,8 @@ class Signal:
     stop_limit_price: Optional[float] = None
     stop_trail_amount: Optional[float] = None
     stop_trail_percent: Optional[float] = None
+    # Order cancellation field
+    cancel_order_ids: Optional[List[str]] = None
 
 
 class Context:
@@ -175,13 +180,31 @@ class Strategy:
         """Hook called at the beginning of each trading day (optional)."""
         pass
 
-    def on_market_open(self, context: Context, data: pl.DataFrame, portfolio) -> None:
-        """Hook called at market open (optional)."""
-        pass
+    def on_market_open(self, context: Context, data: pl.DataFrame, portfolio) -> List[Signal]:
+        """Hook called at market open (optional).
+        
+        This method is called at the official market open time and can return
+        trading signals that will be executed immediately.
+        
+        :param context: Strategy context
+        :param data: Market data at market open
+        :param portfolio: Current portfolio state
+        :returns: List of Signal objects to execute at market open
+        """
+        return []
 
-    def on_market_close(self, context: Context, data: pl.DataFrame, portfolio) -> None:
-        """Hook called at market close (optional)."""
-        pass
+    def on_market_close(self, context: Context, data: pl.DataFrame, portfolio) -> List[Signal]:
+        """Hook called at market close (optional).
+        
+        This method is called at the official market close time and can return
+        trading signals that will be executed immediately.
+        
+        :param context: Strategy context  
+        :param data: Market data at market close
+        :param portfolio: Current portfolio state
+        :returns: List of Signal objects to execute at market close
+        """
+        return []
 
     def on_bar(self, context: Context, data: pl.DataFrame) -> None:
         """Hook called when a new bar is received (optional)."""
@@ -194,7 +217,37 @@ class Strategy:
     def on_trade(
         self, context: Context, trade_event: Dict[str, Any], portfolio
     ) -> None:
-        """Hook called when a trade from this strategy is executed (optional)."""
+        """Hook called when a trade from this strategy is executed (optional).
+        
+        This method is called immediately after each transaction is executed,
+        allowing the strategy to implement custom logic for trade tracking,
+        position management, or other trade-related functionality.
+        
+        The callback captures ALL types of trades including:
+        - Regular market/limit orders
+        - Stop loss orders (from bracket orders or standalone)
+        - Take profit orders (from bracket orders)
+        - Trailing stop orders
+        - OCO (One-Cancels-Other) orders
+        
+        Args:
+            context: Strategy context containing state and parameters
+            trade_event: Dictionary containing trade details with keys:
+                - timestamp: When the trade was executed
+                - transaction_id: Unique identifier for this transaction
+                - order_id: ID of the order that generated this trade
+                - symbol: Asset symbol that was traded
+                - quantity: Signed quantity (positive for buys, negative for sells)
+                - price: Execution price per share/unit
+                - commission: Commission paid for this trade
+                - value: Total trade value (quantity * price)
+                - trade_type: Type of trade ("regular", "bracket", "stop_order")
+                - bracket_role: Role in bracket ("take_profit", "stop_loss", or None)
+                - parent_order_id: Parent order ID for bracket orders (or None)
+                - oco_group_id: OCO group ID for linked orders (or None)
+                - order_type: Original order type ("market", "limit", "stop", etc.)
+            portfolio: Current portfolio state after the trade
+        """
         pass
 
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:

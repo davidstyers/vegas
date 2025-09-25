@@ -328,6 +328,7 @@ class Broker:
           - Backward compatibility: `price` is accepted as alias for `limit_price`.
           - Brackets/OCO: If take-profit or stop-loss fields are present, child orders are created when the
             parent is fully filled and linked via OCO semantics.
+          - Cancellation: If cancel_order_ids is provided, those orders are cancelled first.
 
         :param signal: Strategy signal describing the desired order.
         :type signal: vegas.strategy.Signal
@@ -337,6 +338,20 @@ class Broker:
         :Example:
             >>> order = broker.place_order(Signal(symbol='AAPL', quantity=10))
         """
+        # Handle order cancellations first if specified
+        if hasattr(signal, 'cancel_order_ids') and signal.cancel_order_ids:
+            for order_id in signal.cancel_order_ids:
+                self.cancel_order(order_id)
+        
+        # If this is a cancellation-only signal (quantity=0), return a dummy order
+        if signal.quantity == 0:
+            return Order(
+                id=str(uuid.uuid4()),
+                symbol=signal.symbol,
+                quantity=0,
+                order_type=OrderType.MARKET,
+                status=OrderStatus.CANCELLED  # Mark as cancelled since it's not a real order
+            )
         # Quantity sign determines side; do NOT read any 'action' attribute for side
         qty_in = float(signal.quantity)
         quantity = qty_in  # preserve sign as provided by caller
@@ -879,6 +894,23 @@ class Broker:
             if order.id == order_id:
                 return order
         return None
+
+    def get_bracket_order_ids(self, symbol: str) -> List[str]:
+        """Return list of active bracket order IDs for a symbol.
+
+        :param symbol: Trading symbol.
+        :type symbol: str
+        :returns: List of order IDs for active bracket orders.
+        :rtype: List[str]
+        """
+        bracket_order_ids = []
+        for order in self.orders:
+            if (order.symbol == symbol and 
+                order.status in [OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED] and
+                hasattr(order, 'bracket_role') and 
+                order.bracket_role in ['take_profit', 'stop_loss']):
+                bracket_order_ids.append(order.id)
+        return bracket_order_ids
 
     def update_market_values(self, market_data: Dict[str, pl.DataFrame]) -> None:
         """Mark all positions to market using provided snapshot.
