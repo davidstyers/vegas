@@ -34,7 +34,7 @@ class PipelineStrategy(Strategy):
         pipe = make_pipeline()
 
         # Attach the pipeline to the engine
-        context._engine.attach_pipeline(pipe, "my_pipeline")
+        context.engine.attach_pipeline(pipe, "my_pipeline")
 
         # Set a commission model
         context.set_commission(
@@ -45,7 +45,7 @@ class PipelineStrategy(Strategy):
         """Process pipeline results before the trading day starts."""
         try:
             # Get the pipeline output
-            results = context._engine.pipeline_output("my_pipeline")
+            results = context.engine.pipeline_output("my_pipeline")
 
             longs = results.select("symbol").to_series().to_list()
 

@@ -7,7 +7,7 @@ using an event-driven approach.
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
+import polars as pl
 
 
 @dataclass
@@ -42,8 +42,11 @@ class Signal:
     :type stop_trail_amount: Optional[float]
     :param stop_trail_percent: Trailing stop percent for bracket child (0.3 = 30%).
     :type stop_trail_percent: Optional[float]
+    :param cancel_order_ids: List of order IDs to cancel before placing this order.
+    :type cancel_order_ids: Optional[List[str]]
     :Example:
         >>> Signal(symbol='AAPL', quantity=10, order_type='limit', limit_price=190.0)
+        >>> Signal(symbol='AAPL', quantity=0, cancel_order_ids=['order_123', 'order_456'])
     """
 
     symbol: str
@@ -61,6 +64,8 @@ class Signal:
     stop_limit_price: Optional[float] = None
     stop_trail_amount: Optional[float] = None
     stop_trail_percent: Optional[float] = None
+    # Order cancellation field
+    cancel_order_ids: Optional[List[str]] = None
 
 
 class Context:
@@ -73,7 +78,7 @@ class Context:
     def __init__(self):
         """Initialize an empty context with optional commission helper."""
         self._portfolio = None
-        self._engine = None  # Reference to the BacktestEngine
+        self.engine = None  # Reference to the BacktestEngine
         self.current_date = None
 
         # Commission model configured by the strategy (defaults applied by engine/broker if not set)
@@ -114,7 +119,7 @@ class Context:
         :param engine: Backtest engine instance.
         :type engine: Any
         """
-        self._engine = engine
+        self.engine = engine
 
     def set_commission(self, commission_model) -> None:
         """Set the commission model for this strategy instance."""
@@ -167,36 +172,131 @@ class Strategy:
         """
         pass
 
-    def handle_data(self, context: Context, data: pd.DataFrame) -> List[Signal]:
+    def handle_data(self, context: Context, data: pl.DataFrame) -> List[Signal]:
         """Process market data and return a list of `Signal` objects."""
         return []
 
-    def before_trading_start(self, context: Context, data: pd.DataFrame) -> None:
+    def before_trading_start(self, context: Context, data: pl.DataFrame) -> None:
         """Hook called at the beginning of each trading day (optional)."""
         pass
 
-    def on_market_open(self, context: Context, data: pd.DataFrame, portfolio) -> None:
-        """Hook called at market open (optional)."""
-        pass
+    def on_market_open(self, context: Context, data: pl.DataFrame, portfolio) -> List[Signal]:
+        """Hook called at market open (optional).
+        
+        This method is called at the official market open time and can return
+        trading signals that will be executed immediately.
+        
+        :param context: Strategy context
+        :param data: Market data at market open
+        :param portfolio: Current portfolio state
+        :returns: List of Signal objects to execute at market open
+        """
+        return []
 
-    def on_market_close(self, context: Context, data: pd.DataFrame, portfolio) -> None:
-        """Hook called at market close (optional)."""
-        pass
+    def on_market_close(self, context: Context, data: pl.DataFrame, portfolio) -> List[Signal]:
+        """Hook called at market close (optional).
+        
+        This method is called at the official market close time and can return
+        trading signals that will be executed immediately.
+        
+        :param context: Strategy context  
+        :param data: Market data at market close
+        :param portfolio: Current portfolio state
+        :returns: List of Signal objects to execute at market close
+        """
+        return []
 
-    def on_bar(self, context: Context, data: pd.DataFrame) -> None:
+    def on_bar(self, context: Context, data: pl.DataFrame) -> None:
         """Hook called when a new bar is received (optional)."""
         pass
 
-    def on_tick(self, context: Context, data: pd.DataFrame) -> None:
+    def on_tick(self, context: Context, data: pl.DataFrame) -> None:
         """Hook called when a new tick is received (optional)."""
         pass
 
     def on_trade(
         self, context: Context, trade_event: Dict[str, Any], portfolio
     ) -> None:
-        """Hook called when a trade from this strategy is executed (optional)."""
+        """Hook called when a trade from this strategy is executed (optional).
+        
+        This method is called immediately after each transaction is executed,
+        allowing the strategy to implement custom logic for trade tracking,
+        position management, or other trade-related functionality.
+        
+        The callback captures ALL types of trades including:
+        - Regular market/limit orders
+        - Stop loss orders (from bracket orders or standalone)
+        - Take profit orders (from bracket orders)
+        - Trailing stop orders
+        - OCO (One-Cancels-Other) orders
+        
+        Args:
+            context: Strategy context containing state and parameters
+            trade_event: Dictionary containing trade details with keys:
+                - timestamp: When the trade was executed
+                - transaction_id: Unique identifier for this transaction
+                - order_id: ID of the order that generated this trade
+                - symbol: Asset symbol that was traded
+                - quantity: Signed quantity (positive for buys, negative for sells)
+                - price: Execution price per share/unit
+                - commission: Commission paid for this trade
+                - value: Total trade value (quantity * price)
+                - trade_type: Type of trade ("regular", "bracket", "stop_order")
+                - bracket_role: Role in bracket ("take_profit", "stop_loss", or None)
+                - parent_order_id: Parent order ID for bracket orders (or None)
+                - oco_group_id: OCO group ID for linked orders (or None)
+                - order_type: Original order type ("market", "limit", "stop", etc.)
+            portfolio: Current portfolio state after the trade
+        """
         pass
 
     def analyze(self, context: Context, results: Dict[str, Any]) -> None:
         """Hook called at the end of the backtest for custom analysis (optional)."""
         pass
+
+    def predict(self, context: Context, data_portal) -> Dict[str, float]:
+        """
+        Generate signals based on current market conditions and available data.
+
+        This method is used by signal research mode to evaluate predictive power
+        of strategy-generated signals without running a full backtest.
+
+        The method has access to:
+        - context: Strategy context with portfolio, engine, and pipeline results
+        - data_portal: DataPortal for historical data access
+        - Pipelines results via context engine (if attached)
+
+        :param context: Strategy context object with portfolio and engine access
+        :type context: Context  
+        :param data_portal: DataPortal instance for historical data access
+        :type data_portal: DataPortal
+        :returns: Dict mapping asset symbols to continuous signal values
+        :rtype: Dict[str, float]
+        
+        Example:
+            >>> def predict(self, context, data_portal) -> Dict[str, float]:
+            ...     signals = {}
+            ...     # Access pipeline results for universe selection
+            ...     if hasattr(context, 'engine') and context.engine._pipeline_results:
+            ...         universe_data = context.engine._pipeline_results.get('screening_pipeline')
+            ...         if universe_data is not None:
+            ...             symbols = universe_data['symbol'].to_list()
+            ...         else:
+            ...             symbols = self.universe  # fallback to static universe
+            ...     else:
+            ...         symbols = getattr(self, 'universe', data_portal.get_symbols())
+            ...     
+            ...     for symbol in symbols:
+            ...         hist_data = data_portal.history(assets=[symbol], bar_count=20)
+            ...         if not hist_data.is_empty():
+            ...             # Generate signal based on historical data
+            ...             signals[symbol] = 0.5  # Example signal
+            ...     return signals
+        
+        Returns:
+            Continuous scores for each asset (positive=bullish, negative=bearish).
+            For assets not in current universe, return no entry (engine fills with null).
+            Must be compatible with both single-asset and multi-asset universes.
+            Dynamic universes can be created via pipeline results.
+        """
+        return {}

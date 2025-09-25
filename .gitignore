@@ -129,8 +129,8 @@ venv.bak/
 *.whl
 
 # Data
-data/
 db/
 dev/
+tick_data/
 report.html
 positions_ledger.csv

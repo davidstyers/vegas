@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased] - 2025-09-07
+
+### Added
+- Enhanced data ingestion and CLI functionality for TBBO tick data
+- Signal generation capabilities to BacktestEngine and Strategy classes
+- Alpha analytics module with decision tracking and metrics
+- Data transformation framework with frequency management
+- Tick bars and OHLCV resampling capabilities
+- Tabulate utility for data formatting
+- Data portal for enhanced data access patterns
+
+### Changed
+- Refactored strategy context handling and removed deprecated files
+- Enhanced performance analytics and reporting capabilities
+- Streamlined pipeline scheduling in BacktestEngine
+- Improved CLI interface with better calendar selection support
+
+### Fixed
+- Removed deprecated database files and cleaned up repository structure
+
+## [0.0.2] - 2025-08-19
+
+### Added
+- Unified calendar system for timestamp filtering
+- Enhanced performance analytics and reporting capabilities
+- Hyperopt integration for strategy optimization
+- IBKR (Interactive Brokers) support and broker adapter functionality
+- Live trading capabilities with market data feeds
+- Simulated broker adapters for testing
+- Pipeline system for data processing and factor generation
+- Advanced filtering and statistical factors
+- Comprehensive test suite with integration tests
+- Performance benchmarking tools
+- Calendar-based market hours handling
+
+### Changed
+- Enhanced BacktestEngine to utilize unified calendar system
+- Improved CLI interface to support calendar selection for backtesting
+- Refactored various components for better architecture alignment
+- Updated documentation and formatting across multiple files
+- Enhanced broker adapter functionality
+- Improved pipeline functionality and dependencies
+- Streamlined repository structure by removing obsolete files
+
+### Fixed
+- Enhanced timezone handling in database conversions
+- Improved error handling in database connections
+- Fixed pipeline return types and data handling
+- Repository cleanup by removing compiled Python files
+
 ## [1.0.0] - 2023-07-15
 
 ### Added

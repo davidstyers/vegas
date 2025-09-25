@@ -46,10 +46,13 @@ from vegas.analytics import Results
 from vegas.analytics.results_helper import create_results_from_dict
 from vegas.broker import Broker
 from vegas.data import DataLayer, DataPortal
+from vegas.data.transform import FrequencyManager
+from vegas.data.transform.base import DataType
 from vegas.pipeline.engine import PipelineEngine
 from vegas.portfolio import Portfolio
 from vegas.strategy import Context, Signal, Strategy
 from vegas.calendars import get_calendar
+from vegas.calendars.base import TradingCalendar
 
 
 class BacktestEngine:
@@ -117,6 +120,13 @@ class BacktestEngine:
         self.pipeline_engine = PipelineEngine(self.data_portal)
         self.attached_pipelines: Dict[str, Any] = {}
         self._pipeline_results: Dict[str, pl.DataFrame] = {}
+        
+        # Default frequency for data queries
+        self._default_frequency: str = "1h"
+        
+        # Market hours timestamps for strategy hooks
+        self._market_open_timestamps: set = set()
+        self._market_close_timestamps: set = set()
 
     def set_calendar(self, name: str) -> None:
         """Select the trading calendar used to filter market data.
@@ -132,6 +142,30 @@ class BacktestEngine:
         # Validate early and store name; actual instance is resolved at load time
         get_calendar(name)
         self._calendar_name = name
+
+    def set_frequency(self, frequency: str) -> None:
+        """Set the default frequency for data queries.
+
+        :param frequency: The frequency string (e.g., '1h', '1d', '5m', 'tick:100').
+        :type frequency: str
+        :returns: None
+        :rtype: None
+        :Example:
+            >>> engine.set_frequency("1d")
+        """
+        self._default_frequency = frequency
+        # Also set the frequency on the data portal
+        self.data_portal.set_frequency(frequency)
+
+    def get_frequency(self) -> str:
+        """Get the current default frequency for data queries.
+
+        :returns: The current default frequency string.
+        :rtype: str
+        :Example:
+            >>> freq = engine.get_frequency()
+        """
+        return self._default_frequency
 
     # Legacy market-hours helpers removed in favor of calendar-based filtering.
 
@@ -334,6 +368,8 @@ class BacktestEngine:
         end: datetime,
         strategy: Strategy,
         initial_capital: float = 100_000.0,
+        frequency: str = "1h",
+        data_type: str = "ohlcv",
     ) -> Results:
         """Run a historical backtest between ``start`` and ``end``.
 
@@ -351,13 +387,21 @@ class BacktestEngine:
         :type strategy: Strategy
         :param initial_capital: Initial cash balance used to seed the portfolio and broker.
         :type initial_capital: float
+        :param frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+        :type frequency: str
+        :param data_type: Type of underlying data ("ohlcv", "tick", "tbbo")
+        :type data_type: str
         :returns: A Results object containing stats, equity curve, transactions, positions, and success flag.
         :rtype: Results
         :raises Exception: Propagates exceptions thrown by user strategy code or I/O layers.
         :Example:
-            >>> results = engine.run(start, end, my_strategy, initial_capital=50_000)
+            >>> results = engine.run(start, end, my_strategy, initial_capital=50_000, frequency="4h")
+            >>> results = engine.run(start, end, my_strategy, frequency="tick:1000", data_type="tick")
         """
         self._logger.info(f"Starting backtest from {start} to {end}")
+
+        # Set the default frequency for this run
+        self.set_frequency(frequency)
 
         # Initialize strategy and portfolio
         self.strategy = strategy
@@ -410,11 +454,12 @@ class BacktestEngine:
         start_time = time.time()
 
         # Build the unified timestamp index that will drive daily/intraday iteration.
-        timestamp_index: pl.Series = self._prepare_market_data(start, end)
+        timestamp_index: pl.Series = self._prepare_market_data(start, end, frequency, data_type)
+        print(timestamp_index)
 
         # Run the backtest
         self._logger.info("Executing backtest")
-        results_dict = self._run_backtest(context, timestamp_index)
+        results_dict = self._run_backtest(context, timestamp_index, frequency)
 
         # Calculate execution time
         execution_time = time.time() - start_time
@@ -431,23 +476,202 @@ class BacktestEngine:
 
         return results
 
-    def _prepare_market_data(self, start: datetime, end: datetime) -> pl.Series:
+    def generate_signals(
+        self,
+        start: datetime,
+        end: datetime,
+        strategy: Strategy,
+    ) -> pl.DataFrame:
+        """
+        Iterate through time, call strategy.predict(),
+        collect results into a Polars DataFrame with:
+            - one row per timestamp
+            - one column per asset
+            - 'datetime' column as primary key
+
+        This method is used by signal research mode to evaluate predictive power
+        of strategy-generated signals without running a full backtest.
+
+        :param start: Inclusive start datetime for the signal generation window.
+        :type start: datetime
+        :param end: Inclusive end datetime for the signal generation window.
+        :type end: datetime
+        :param strategy: Strategy instance implementing the predict() method.
+        :type strategy: Strategy
+        :returns: Polars DataFrame with datetime column and one column per asset
+        :rtype: pl.DataFrame
+        :Example:
+            >>> signals_df = engine.generate_signals(start, end, my_strategy)
+            >>> print(signals_df.columns)  # ['datetime', 'AAPL', 'MSFT', ...]
+        """
+        self._logger.info(f"Generating signals from {start} to {end}")
+
+        # Initialize strategy and portfolio
+        self.strategy = strategy
+        context = self.strategy.context
+        context.set_engine(
+            self
+        )  # Allow strategies to access engine helpers like pipelines
+
+        # Load data explicitly for signal generation (don't rely on strategy universe)
+        timestamp_index: pl.Series = self._prepare_signal_generation_data(start, end)
+
+        if timestamp_index is None or len(timestamp_index) == 0:
+            self._logger.warning("No timestamp index available for signal generation")
+            return pl.DataFrame({"datetime": []})
+
+        # Initialize strategy
+        self.strategy.initialize(context)
+
+        trading_date_series = (
+            pl.DataFrame({"timestamp": timestamp_index})
+            .select(pl.col("timestamp").dt.date().alias("date"))
+            .unique()
+            .sort("date")
+            .get_column("date")
+        )
+        if trading_date_series.len() == 0:
+            self._logger.warning("No data available for the specified period")
+            return pl.DataFrame({"datetime": []})
+
+        unique_dates: List[datetime.date] = trading_date_series.to_list()
+        self._logger.info(f"Processing {len(unique_dates)} trading days")
+
+        # Initialize the signals collection structure
+        signals_data = {"datetime": []}
+        all_symbols = set()  # Track all symbols we've seen
+
+        # Process data day by day
+        for current_date in unique_dates:
+            # Clear previous pipeline results so strategies see fresh daily outputs.
+            self._pipeline_results = {}
+
+            # Find the first available timestamp for this date for pipeline execution
+            # Pipeline needs historical data ending at a valid market time, not midnight
+            daily_timestamps = [ts for ts in timestamp_index if ts.date() == current_date]
+            if daily_timestamps:
+                # Use the first available market timestamp for this date
+                pipeline_dt = daily_timestamps[0]
+            else:
+                # Fallback to midnight if no timestamps found (shouldn't happen)
+                pipeline_dt = datetime.combine(current_date, datetime.min.time())
+            
+            context.current_ts = pipeline_dt
+            self.data_portal.set_current_dt(context.current_ts)
+            self._logger.info(f"Set data portal current_dt to {context.current_ts} for pipeline execution")
+
+            # Compute any attached pipelines for this day
+            for name, pipeline in self.attached_pipelines.items():
+                try:
+                    # Run pipeline for just this date. Many ranking/screening pipelines operate daily.
+                    pipeline_result = self.pipeline_engine.run_pipeline(
+                        pipeline,
+                        start_date=context.current_ts,
+                        end_date=context.current_ts,
+                    )
+                    if pipeline_result.height > 0:
+                        # Expose results via pipeline_output for the strategy to consume.
+                        self._pipeline_results[name] = pipeline_result
+                        self._logger.debug(
+                            f"Pipeline '{name}' computed {len(pipeline_result)} results for {current_date}"
+                        )
+                    else:
+                        self._logger.warning(
+                            f"Pipeline '{name}' returned empty results for {current_date}"
+                        )
+                except Exception as e:
+                    self._logger.warning(f"Pipeline '{name}' failed for {current_date}: {e}")
+
+            # Call before_trading_start at the beginning of each day
+            if hasattr(self.strategy, "before_trading_start"):
+                self.strategy.before_trading_start(context, self.data_portal)
+
+            # Determine the day's timestamp sequence from the unified index.
+            day_timestamp_series = (
+                pl.DataFrame({"timestamp": timestamp_index})
+                .with_columns(pl.col("timestamp").dt.date().alias("date"))
+                .filter(pl.col("date") == current_date)
+                .select("timestamp")
+                .get_column("timestamp")
+            )
+            iter_timestamps: List[datetime] = day_timestamp_series.to_list()
+
+            # Process each timestamp chronologically
+            for timestamp in iter_timestamps:
+                self.data_portal.set_current_dt(timestamp)
+                context.current_ts = timestamp
+
+                # Call strategy predict method to generate signals
+                signals = {}
+                if hasattr(self.strategy, "predict"):
+                    try:
+                        signals = self.strategy.predict(context, self.data_portal)
+                        if signals is None:
+                            signals = {}
+                    except Exception as e:
+                        self._logger.warning(f"Strategy predict failed at {timestamp}: {e}")
+                        signals = {}
+
+                # Track all symbols we've encountered
+                all_symbols.update(signals.keys())
+                
+                # Collect signals into our structure
+                signals_data["datetime"].append(timestamp)
+                
+                # Initialize symbol columns if we haven't seen them before
+                for symbol in signals.keys():
+                    if symbol not in signals_data:
+                        # Backfill with None for previous timestamps
+                        signals_data[symbol] = [None] * (len(signals_data["datetime"]) - 1)
+
+                # Add current signals and None for missing symbols
+                for symbol in all_symbols:
+                    if symbol not in signals_data:
+                        signals_data[symbol] = [None] * len(signals_data["datetime"])
+                    
+                    if symbol in signals:
+                        signals_data[symbol].append(signals[symbol])
+                    else:
+                        signals_data[symbol].append(None)
+
+        # Ensure all symbol columns have the same length
+        for symbol in all_symbols:
+            if symbol in signals_data:
+                while len(signals_data[symbol]) < len(signals_data["datetime"]):
+                    signals_data[symbol].append(None)
+                        
+        # Create the DataFrame
+        if not signals_data["datetime"]:
+            return pl.DataFrame({"datetime": []})
+            
+        result_df = pl.DataFrame(signals_data)
+        
+        self._logger.info(f"Generated signals for {len(signals_data['datetime'])} timestamps and {len(all_symbols)} symbols")
+        return result_df
+
+    def _prepare_market_data(self, start: datetime, end: datetime, frequency: str = "1h", data_type: str = "ohlcv") -> pl.Series:
         """Load and prepare data; return the unified timestamp index.
 
         Steps performed:
         - Determine strategy universe if explicitly provided by the strategy.
+        - Parse frequency specification and determine data transformations needed.
         - Compute earliest preload start using window length requirements from attached pipelines.
-        - Preload required frequencies into the ``DataPortal`` cache.
+        - Preload required frequencies into the ``DataPortal`` cache with transformations.
         - Build and return the unified timestamp index that will drive simulation.
 
         :param start: Inclusive start datetime for the backtest window.
         :type start: datetime
         :param end: Inclusive end datetime for the backtest window.
         :type end: datetime
+        :param frequency: Data frequency or bar specification (e.g., "1h", "tick:1000", "volume:5000")
+        :type frequency: str
+        :param data_type: Type of underlying data ("ohlcv", "tick", "tbbo")
+        :type data_type: str
         :returns: Unified timestamp index as a Polars ``Series``.
         :rtype: polars.Series
         :Example:
-            >>> idx = engine._prepare_market_data(start, end)
+            >>> idx = engine._prepare_market_data(start, end, "4h", "ohlcv")
+            >>> idx = engine._prepare_market_data(start, end, "tick:1000", "tick")
         """
         # Determine strategy-provided static universe to reduce I/O, if available.
         try:
@@ -464,10 +688,28 @@ class BacktestEngine:
         except Exception:
             strategy_universe = None
 
-        # Frequencies to materialize. Default to 1h for a balanced intraday cadence.
-        frequency_set: Set[str] = {"1h"}
+        # Parse frequency specification to understand what data transformations are needed
+        freq_spec = FrequencyManager.parse_frequency(frequency, DataType(data_type))
+        self._logger.info(f"Using frequency: {freq_spec.frequency_type.value} with value: {freq_spec.value}")
+        
+        # Validate frequency is compatible with data type
+        if not FrequencyManager.validate_frequency_for_data_type(freq_spec):
+            raise ValueError(f"Frequency '{frequency}' is not compatible with data type '{data_type}'")
+        
+        # Determine what underlying frequencies we need to load from storage
+        # For time-based frequencies, we load the specified frequency
+        # For bar-based frequencies, we need to load tick data first
+        if freq_spec.frequency_type.name == "TIME":
+            frequency_set: Set[str] = {frequency}
+            effective_frequency = frequency
+        else:
+            # For bar-based transformations, we need raw tick data
+            frequency_set = {"tick"}  # Load raw tick data
+            effective_frequency = "tick"
+            
         preload_start: datetime = start
         try:
+            # Add frequencies from attached pipelines
             for pipeline in getattr(self, "attached_pipelines", {}).values():
                 freq: Optional[str] = getattr(pipeline, "frequency", None)
                 if isinstance(freq, str) and freq:
@@ -501,21 +743,427 @@ class BacktestEngine:
         except Exception:
             pass
 
+        # Store the original frequency specification for transformations BEFORE loading data
+        self.data_portal._original_frequency = frequency
+        self.data_portal._original_frequency_spec = freq_spec
+
         self.data_portal.load_data(
             start_date=preload_start,
             end_date=end,
             symbols=strategy_universe,
             frequencies=sorted(frequency_set),
             calendar=cal,
+            data_type=data_type,
         )
 
+        # Store frequency spec for later use in data retrieval
+        self._current_frequency_spec = freq_spec
+        
         # Build and return the timestamp index from the cache.
-        return self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
+        base_timestamp_index = self.data_portal.get_unified_timestamp_index(start, end, frequency=effective_frequency)
+        
+        # Inject market open/close timestamps if strategy uses on_market_open or on_market_close
+        if (hasattr(self.strategy, "on_market_open") or hasattr(self.strategy, "on_market_close")):
+            enhanced_timestamp_index = self._inject_market_hours_timestamps(
+                base_timestamp_index, start, end, frequency, data_type, cal
+            )
+            return enhanced_timestamp_index
+        
+        return base_timestamp_index
+
+    def _prepare_signal_generation_data(self, start: datetime, end: datetime) -> pl.Series:
+        """Load and prepare data for signal generation; return the unified timestamp index.
+        
+        Unlike _prepare_market_data, this method loads all available symbols to ensure
+        pipelines have data to work with, regardless of strategy universe settings.
+
+        :param start: Inclusive start datetime for the signal generation window.
+        :type start: datetime
+        :param end: Inclusive end datetime for the signal generation window.
+        :type end: datetime
+        :returns: Unified timestamp index as a Polars Series.
+        :rtype: polars.Series
+        """
+        # Frequencies to materialize. Default to 1h for a balanced intraday cadence.
+        frequency_set: Set[str] = {"1h"}
+        preload_start: datetime = start
+        
+        # Compute preload window from attached pipelines
+        # Note: At signal generation time, pipelines may not be attached yet since 
+        # strategy.initialize() hasn't been called. We need to ensure common frequencies are loaded.
+        frequency_set.add("1d")  # Add daily frequency for pipelines that typically use daily data
+        
+        try:
+            for pipeline in getattr(self, "attached_pipelines", {}).values():
+                freq: Optional[str] = getattr(pipeline, "frequency", None)
+                if isinstance(freq, str) and freq:
+                    frequency_set.add(freq)
+                try:
+                    max_window = self.pipeline_engine._get_max_window_length(pipeline)
+                except Exception:
+                    max_window = 0
+                if max_window and max_window > 0:
+                    if freq == "1d":
+                        candidate = start - timedelta(days=int(max_window))
+                    elif freq == "1h":
+                        candidate = start - timedelta(hours=int(max_window))
+                    else:
+                        candidate = start - timedelta(hours=int(max_window))
+                    if candidate < preload_start:
+                        preload_start = candidate
+        except Exception:
+            pass
+
+        # Resolve calendar and propagate timezone to data components
+        cal = get_calendar(getattr(self, "_calendar_name", "24/7"))
+        try:
+            # Align engine and data layer/portal timezones to the calendar's timezone
+            self.timezone = getattr(cal, "timezone", self.timezone)
+            if hasattr(self.data_layer, "timezone"):
+                self.data_layer.timezone = self.timezone
+            if hasattr(self.data_portal, "timezone"):
+                self.data_portal.timezone = self.timezone
+        except Exception:
+            pass
+
+        # Load data for ALL available symbols (symbols=None means all available)
+        # This ensures pipelines have data to work with regardless of strategy universe
+        self._logger.info(f"Loading data for signal generation: {preload_start} to {end}, frequencies: {sorted(frequency_set)}")
+        self.data_portal.load_data(
+            start_date=preload_start,
+            end_date=end,
+            symbols=None,  # Load all available symbols
+            frequencies=sorted(frequency_set),
+            calendar=cal,
+        )
+        self._logger.info("Data loading completed for signal generation")
+        
+        # Check what symbols are available after loading
+        try:
+            available_symbols = self.data_portal.get_symbols()
+            self._logger.info(f"Available symbols after loading: {len(available_symbols) if available_symbols else 0}")
+            if available_symbols:
+                self._logger.info(f"Sample symbols: {available_symbols[:10]}")
+        except Exception as e:
+            self._logger.warning(f"Could not get available symbols: {e}")
+
+        # Build and return the timestamp index from the cache.
+        timestamp_index = self.data_portal.get_unified_timestamp_index(start, end, frequency="1h")
+        self._logger.info(f"Generated timestamp index with {len(timestamp_index) if timestamp_index is not None else 0} timestamps")
+        
+        # Debug: Show sample timestamps to understand data availability
+        if timestamp_index is not None and len(timestamp_index) > 0:
+            sample_timestamps = timestamp_index.head(5).to_list()
+            self._logger.info(f"Sample timestamps: {sample_timestamps}")
+        
+        return timestamp_index
+
+    def _inject_market_hours_timestamps(
+        self,
+        base_timestamp_index: pl.Series,
+        start: datetime,
+        end: datetime,
+        frequency: str,
+        data_type: str,
+        calendar: TradingCalendar,
+    ) -> pl.Series:
+        """Inject market open/close timestamps into the timestamp index.
+        
+        This method identifies market open and close times for each trading day and ensures
+        these timestamps are included in the index for strategy hooks.
+        
+        :param base_timestamp_index: Original timestamp index from data
+        :param start: Backtest start date
+        :param end: Backtest end date  
+        :param frequency: Data frequency
+        :param data_type: Type of data (tick, ohlcv, etc.)
+        :param calendar: Trading calendar to get market hours
+        :returns: Enhanced timestamp index with market hours
+        """
+        try:
+            # Check if the data resolution supports market hours detection
+            if not self._supports_market_hours_detection(frequency, data_type):
+                raise ValueError(
+                    f"Data resolution '{frequency}' with type '{data_type}' does not support "
+                    f"market hours detection. on_market_open and on_market_close methods "
+                    f"require tick data or OHLC data with intraday frequency."
+                )
+            
+            if base_timestamp_index.is_empty():
+                return base_timestamp_index
+                
+            # Convert to DataFrame for easier manipulation
+            index_df = pl.DataFrame({"timestamp": base_timestamp_index})
+            
+            # Get unique trading dates
+            trading_dates = (
+                index_df
+                .select(pl.col("timestamp").dt.date().alias("date"))
+                .unique()
+                .sort("date")
+                .get_column("date")
+                .to_list()
+            )
+
+            market_hour_timestamps = []
+            
+            # Check if the calendar has market hours defined
+            has_market_hours = (
+                hasattr(calendar, 'market_open_time') and 
+                hasattr(calendar, 'market_close_time') and
+                calendar.market_open_time is not None and 
+                calendar.market_close_time is not None
+            )
+            
+            if not has_market_hours:
+                raise ValueError(
+                    f"Calendar '{getattr(calendar, 'name', 'Unknown')}' does not define market hours. "
+                    f"Calendars must have market_open_time and market_close_time attributes "
+                    f"to support on_market_open and on_market_close strategy methods."
+                )
+            
+            for trading_date in trading_dates:
+                # Get market open/close times from calendar for this date
+                market_open_time, market_close_time = self._get_market_hours_for_date(
+                    trading_date, calendar
+                )
+
+                if market_open_time is None or market_close_time is None:
+                    continue
+                
+                # Find actual data points for this trading day
+                day_data = index_df.filter(
+                    pl.col("timestamp").dt.date() == trading_date
+                ).sort("timestamp")
+                
+                if day_data.is_empty():
+                    continue
+                
+                # Get first and last data timestamps for the day
+                first_data_time = day_data.get_column("timestamp").min()
+                last_data_time = day_data.get_column("timestamp").max()
+                
+                # Determine market open/close timestamps based on data type
+                if data_type == "tick":
+                    # For tick data, find the first trade on/after market open and last trade on/before market close
+                    # This handles extended hours data correctly
+                    market_open_timestamp = self._find_trade_near_market_time(
+                        day_data, market_open_time, "open"
+                    )
+                    market_close_timestamp = self._find_trade_near_market_time(
+                        day_data, market_close_time, "close"
+                    )
+                elif data_type in ["ohlcv", "ohlc"]:
+                    # For OHLC data, use the bar that contains market open/close
+                    market_open_timestamp = self._find_bar_containing_time(
+                        day_data, market_open_time, "open"
+                    )
+                    market_close_timestamp = self._find_bar_containing_time(
+                        day_data, market_close_time, "close"
+                    )
+                else:
+                    # Fallback to calendar times if data type is unknown
+                    market_open_timestamp = market_open_time
+                    market_close_timestamp = market_close_time
+                
+                # Add timestamps if they're not None and not already in the base index
+                if market_open_timestamp is not None:
+                    market_hour_timestamps.append(market_open_timestamp)
+                if market_close_timestamp is not None:
+                    market_hour_timestamps.append(market_close_timestamp)
+            
+                # Combine base timestamps with market hour timestamps
+                if market_hour_timestamps:
+                    combined_timestamps = pl.concat([
+                        base_timestamp_index,
+                        pl.Series("timestamp", market_hour_timestamps, dtype=base_timestamp_index.dtype)
+                    ]).unique().sort()
+                    
+                    # Store the actual market hour timestamps for later use in the backtest loop
+                    # We need to re-identify which timestamps are open/close for each day
+                    self._market_open_timestamps = set()
+                    self._market_close_timestamps = set()
+                    
+                    for trading_date in trading_dates:
+                        # Re-get market hours for this date
+                        market_open_time, market_close_time = self._get_market_hours_for_date(
+                            trading_date, calendar
+                        )
+                        
+                        if market_open_time is None or market_close_time is None:
+                            continue
+                            
+                        # Find actual data points for this trading day from combined timestamps
+                        day_data = pl.DataFrame({
+                            "timestamp": combined_timestamps.filter(
+                                combined_timestamps.dt.date() == trading_date
+                            ).sort()
+                        })
+                        
+                        if day_data.is_empty():
+                            continue
+                        
+                        # Find the actual market open/close timestamps using the same logic
+                        if data_type == "tick":
+                            market_open_timestamp = self._find_trade_near_market_time(
+                                day_data, market_open_time, "open"
+                            )
+                            market_close_timestamp = self._find_trade_near_market_time(
+                                day_data, market_close_time, "close"
+                            )
+                        elif data_type in ["ohlcv", "ohlc"]:
+                            market_open_timestamp = self._find_bar_containing_time(
+                                day_data, market_open_time, "open"
+                            )
+                            market_close_timestamp = self._find_bar_containing_time(
+                                day_data, market_close_time, "close"
+                            )
+                        else:
+                            market_open_timestamp = market_open_time
+                            market_close_timestamp = market_close_time
+                        
+                        # Store the actual market hour timestamps
+                        if market_open_timestamp is not None:
+                            self._market_open_timestamps.add(market_open_timestamp)
+                        if market_close_timestamp is not None:
+                            self._market_close_timestamps.add(market_close_timestamp)
+                    
+                    return combined_timestamps
+            
+            return base_timestamp_index
+            
+        except ValueError as e:
+            # Re-raise ValueError for unsupported data resolutions to fail fast
+            self._logger.error(f"Failed to inject market hours timestamps: {e}")
+            raise e
+        except Exception as e:
+            self._logger.warning(f"Failed to inject market hours timestamps: {e}")
+            return base_timestamp_index
+
+    def _supports_market_hours_detection(self, frequency: str, data_type: str) -> bool:
+        """Check if the given frequency and data type support market hours detection."""
+        # Tick data always supports market hours detection
+        if data_type == "tick":
+            return True
+            
+        # OHLC data supports it if frequency is intraday
+        if data_type in ["ohlcv", "ohlc"]:
+            # Parse frequency to check if it's intraday
+            try:
+                from vegas.data.transform import FrequencyManager
+                from vegas.data.transform.base import DataType
+                
+                freq_spec = FrequencyManager.parse_frequency(frequency, DataType(data_type))
+                
+                # Time-based frequencies that are less than 1 day support market hours
+                if freq_spec.frequency_type.name == "TIME":
+                    if frequency.endswith('d'):
+                        return False  # Daily or higher resolution doesn't support intraday market hours
+                    return True  # Hours, minutes, seconds support market hours
+                    
+                # Bar-based frequencies (tick:N, volume:N) support market hours
+                return True
+                
+            except Exception:
+                # If we can't parse frequency, be conservative
+                return False
+        
+        return False
+
+    def _get_market_hours_for_date(self, trading_date, calendar) -> tuple:
+        """Get market open and close times for a specific trading date."""
+        try:
+            # Use the calendar's built-in market hours method
+            return calendar.get_market_hours_for_date(trading_date)
+        except Exception as e:
+            self._logger.warning(f"Failed to get market hours for {trading_date}: {e}")
+            return None, None
+
+    def _find_bar_containing_time(self, day_data: pl.DataFrame, target_time: datetime, bar_type: str) -> datetime:
+        """Find the OHLC bar that contains the target time."""
+        try:
+            # For OHLC data, find the bar that would contain this time
+            # This is a simplified approach - in practice you might need more sophisticated logic
+            # based on your bar intervals
+            
+            timestamps = day_data.get_column("timestamp").sort()
+            
+            if bar_type == "open":
+                # Find the first bar that's >= target_time
+                for ts in timestamps:
+                    if ts >= target_time:
+                        return ts
+                # If no bar found, return first bar of the day
+                return timestamps.min() if not timestamps.is_empty() else None
+                
+            elif bar_type == "close":
+                # Find the last bar that's <= target_time, or just use last bar of day
+                return timestamps.max() if not timestamps.is_empty() else None
+                
+        except Exception:
+            pass
+            
+        return None
+
+    def _find_trade_near_market_time(self, day_data: pl.DataFrame, target_time: datetime, timing_type: str) -> datetime:
+        """Find the trade closest to market open/close time in extended hours data.
+        
+        This method properly handles extended trading hours by finding:
+        - For market open: First trade on or after the official market open time
+        - For market close: Last trade on or before the official market close time
+        
+        :param day_data: DataFrame with timestamp data for the trading day
+        :param target_time: Official market open/close time from calendar
+        :param timing_type: "open" or "close"
+        :returns: Timestamp of the appropriate trade, or None if not found
+        """
+        try:
+            timestamps = day_data.get_column("timestamp").sort()
+            
+            # Handle timezone differences between target_time and data timestamps
+            # Convert target_time to naive datetime for comparison if needed
+            target_for_comparison = target_time
+            if target_time.tzinfo is not None:
+                # If target_time is timezone-aware, check if timestamps are naive
+                sample_ts = timestamps[0] if len(timestamps) > 0 else None
+                if sample_ts is not None:
+                    # Convert target to naive datetime in the same timezone for comparison
+                    target_for_comparison = target_time.replace(tzinfo=None)
+            
+            if timing_type == "open":
+                # Find the first trade on or after the market open time
+                for ts in timestamps:
+                    # Convert timestamp to naive for comparison if needed
+                    ts_for_comparison = ts.replace(tzinfo=None) if hasattr(ts, 'tzinfo') and ts.tzinfo is not None else ts
+                    if ts_for_comparison >= target_for_comparison:
+                        return ts
+                # If no trade found on/after market open, return None
+                return None
+                
+            elif timing_type == "close":
+                # Find the last trade on or before the market close time
+                valid_trades = []
+                for ts in timestamps:
+                    # Convert timestamp to naive for comparison if needed
+                    ts_for_comparison = ts.replace(tzinfo=None) if hasattr(ts, 'tzinfo') and ts.tzinfo is not None else ts
+                    if ts_for_comparison <= target_for_comparison:
+                        valid_trades.append(ts)
+                        
+                if valid_trades:
+                    return max(valid_trades)
+                return None
+                
+        except Exception as e:
+            self._logger.warning(f"Failed to find trade near market {timing_type} time {target_time}: {e}")
+            return None
+            
+        return None
 
     def _run_backtest(
         self,
         context: Context,
         timestamp_index: Optional[pl.Series] = None,
+        frequency: str = "1h",
     ) -> Dict[str, Any]:
         """Execute the backtest loop over the provided timestamp index.
 
@@ -529,6 +1177,8 @@ class BacktestEngine:
         :type timestamp_index: Optional[polars.Series]
         :param market_hours: Optional market hours (open, close) used by the broker during execution.
         :type market_hours: Optional[tuple[str, str]]
+        :param frequency: Frequency of the data to use for the backtest.
+        :type frequency: str
         :returns: Results dictionary combining stats, equity curve, transactions, and positions.
         :rtype: dict
         :Example:
@@ -603,17 +1253,59 @@ class BacktestEngine:
                 for timestamp in iter_timestamps:
                     self.data_portal.set_current_dt(timestamp)
 
-                    # Call handle_data for each timestamp to generate trading signals
-                    if hasattr(self.strategy, "handle_data"):
-                        signals = self.strategy.handle_data(context, self.data_portal)
+                    # Check if this is a market open timestamp and handle market open signals
+                    market_open_signals = []
+                    if (hasattr(self, '_market_open_timestamps') and 
+                        timestamp in self._market_open_timestamps and
+                        hasattr(self.strategy, "on_market_open")):
+                        try:
+                            # Get market data for this timestamp
+                            market_data = self.data_portal.get_slice_for_timestamp(timestamp)
+                            market_open_signals = self.strategy.on_market_open(context, market_data, self.portfolio)
+                            if market_open_signals:
+                                self._logger.info(f"Market open generated {len(market_open_signals)} signals at {timestamp}")
+                                for signal in market_open_signals:
+                                    self.broker.place_order(signal)
+                        except Exception as e:
+                            self._logger.warning(f"Strategy on_market_open failed at {timestamp}: {e}")
 
-                        if signals:
-                            for signal in signals:
+                    # Call handle_data for each timestamp to generate trading signals
+                    handle_data_signals = []
+                    if hasattr(self.strategy, "handle_data"):
+                        handle_data_signals = self.strategy.handle_data(context, self.data_portal)
+
+                        if handle_data_signals:
+                            for signal in handle_data_signals:
                                 self.broker.place_order(signal)
+
+                    # Check if this is a market close timestamp and handle market close signals
+                    market_close_signals = []
+                    if (hasattr(self, '_market_close_timestamps') and 
+                        timestamp in self._market_close_timestamps and
+                        hasattr(self.strategy, "on_market_close")):
+                        try:
+                            # Get market data for this timestamp
+                            market_data = self.data_portal.get_slice_for_timestamp(timestamp)
+                            market_close_signals = self.strategy.on_market_close(context, market_data, self.portfolio)
+                            if market_close_signals:
+                                self._logger.info(f"Market close generated {len(market_close_signals)} signals at {timestamp}")
+                                for signal in market_close_signals:
+                                    self.broker.place_order(signal)            
+                        except Exception as e:
+                            self._logger.warning(f"Strategy on_market_close failed at {timestamp}: {e}")
+
+                    # Combine all signals for universe discovery
+                    all_signals = []
+                    if market_open_signals:
+                        all_signals.extend(market_open_signals)
+                    if handle_data_signals:
+                        all_signals.extend(handle_data_signals)
+                    if market_close_signals:
+                        all_signals.extend(market_close_signals)
 
                     # Derive current execution universe to ensure correct pricing and settlement.
                     universe = self._discover_universe(
-                        signals if "signals" in locals() else None
+                        all_signals if all_signals else None
                     )
 
                     # Execute orders using a snapshot sourced via ``DataPortal`` to ensure single data interface.
@@ -625,6 +1317,9 @@ class BacktestEngine:
                             )
                         except Exception:
                             transactions = []
+
+                    # Store transactions for on_trade callback at end of timestamp processing
+                    all_transactions = list(transactions) if transactions else []
 
                     # Update portfolio with transactions or an empty DataFrame if no transactions
                     # This ensures valuations and stats are computed once per timestamp
@@ -644,17 +1339,52 @@ class BacktestEngine:
                     # Portfolio consults ``DataPortal`` for prices; we supply transaction ledger only.
                     self.portfolio.update_from_transactions(timestamp, transactions_pl)
 
-                    # Call on_market_close at the end of the trading day
-                    # Assuming last timestamp of the day is market close
-                    is_last_timestamp = (
-                        (timestamp == max(iter_timestamps))
-                        if len(iter_timestamps) > 0
-                        else False
-                    )
-                    if is_last_timestamp and hasattr(self.strategy, "on_market_close"):
-                        self.strategy.on_market_close(
-                            context, self.data_portal, self.portfolio
-                        )
+                    # Call on_trade callback for all executed transactions at end of timestamp processing
+                    if all_transactions and hasattr(self.strategy, "on_trade"):
+                        for transaction in all_transactions:
+                            try:
+                                # Find the order that generated this transaction to get additional context
+                                order = self.broker.get_order(transaction.order_id)
+                                
+                                # Determine trade type and role
+                                trade_type = "regular"
+                                bracket_role = None
+                                parent_order_id = None
+                                oco_group_id = None
+                                
+                                if order:
+                                    if hasattr(order, 'bracket_role') and order.bracket_role:
+                                        trade_type = "bracket"
+                                        bracket_role = order.bracket_role
+                                    elif hasattr(order, 'parent_id') and order.parent_id:
+                                        trade_type = "bracket"
+                                        parent_order_id = order.parent_id
+                                        bracket_role = getattr(order, 'bracket_role', 'unknown')
+                                    elif order.order_type.value in ['stop', 'stop_limit', 'trail_stop', 'trail_stop_limit']:
+                                        trade_type = "stop_order"
+                                    
+                                    if hasattr(order, 'oco_group_id') and order.oco_group_id:
+                                        oco_group_id = order.oco_group_id
+                                
+                                trade_event = {
+                                    "timestamp": timestamp,
+                                    "transaction_id": transaction.id,
+                                    "order_id": transaction.order_id,
+                                    "symbol": transaction.symbol,
+                                    "quantity": transaction.quantity,
+                                    "price": transaction.price,
+                                    "commission": transaction.commission,
+                                    "value": transaction.value,
+                                    # Enhanced context for edge cases
+                                    "trade_type": trade_type,  # "regular", "bracket", "stop_order"
+                                    "bracket_role": bracket_role,  # "take_profit", "stop_loss", or None
+                                    "parent_order_id": parent_order_id,  # For bracket orders
+                                    "oco_group_id": oco_group_id,  # For OCO orders
+                                    "order_type": order.order_type.value if order else "unknown",
+                                }
+                                self.strategy.on_trade(context, trade_event, self.portfolio)
+                            except Exception as e:
+                                self._logger.warning(f"Strategy on_trade failed for {transaction.symbol} at {timestamp}: {e}")
 
                     context.current_ts = timestamp
 
